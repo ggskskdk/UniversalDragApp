@@ -1,0 +1,173 @@
+package com.tools.universaldrag
+
+import android.content.Context
+import android.graphics.*
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.BackgroundColorSpan
+import android.text.style.ForegroundColorSpan
+import android.util.TypedValue
+import android.view.MotionEvent
+import android.widget.TextView
+import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
+
+/**
+ * 1단계: 손가락으로 글자 위를 드래그하면 원하는 텍스트 구간(start~end)이 실시간 하이라이트됨
+ * 2단계: 하이라이트된 영역을 다시 잡고 끌면 즉시 글로벌 드래그 앤 드롭(Drag Shadow)이 발동됨
+ */
+class RangeSelectableTextView(
+    context: Context,
+    private val rawText: String,
+    private val onSelectionChanged: (String) -> Unit,
+    private val onStartGlobalDrag: (String) -> Unit
+) : TextView(context) {
+
+    private var selStart = 0
+    private var selEnd = rawText.length
+    private var anchorOffset = -1
+    private var isDraggingSelection = false
+    private var isHoldingHighlighted = false
+    private var downX = 0f
+    private var downY = 0f
+
+    private val handlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#818CF8")
+        style = Paint.Style.FILL
+    }
+
+    init {
+        setTextColor(Color.parseColor("#E4E4E7"))
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        setLineSpacing(dp(4f).toFloat(), 1.15f)
+        setPadding(dp(14f), dp(14f), dp(14f), dp(14f))
+        updateHighlight()
+    }
+
+    private fun dp(v: Float): Int =
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, resources.displayMetrics).toInt()
+
+    fun getSelectedText(): String {
+        val s = min(selStart, selEnd).coerceIn(0, rawText.length)
+        val e = max(selStart, selEnd).coerceIn(0, rawText.length)
+        return if (e > s) rawText.substring(s, e) else rawText
+    }
+
+    fun selectAllText() {
+        selStart = 0
+        selEnd = rawText.length
+        updateHighlight()
+    }
+
+    private fun updateHighlight() {
+        val s = min(selStart, selEnd).coerceIn(0, rawText.length)
+        val e = max(selStart, selEnd).coerceIn(0, rawText.length)
+        val span = SpannableString(rawText)
+        if (e > s) {
+            span.setSpan(
+                BackgroundColorSpan(Color.parseColor("#6366F1")),
+                s, e,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            span.setSpan(
+                ForegroundColorSpan(Color.WHITE),
+                s, e,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+        text = span
+        onSelectionChanged(getSelectedText())
+        invalidate()
+    }
+
+    private fun getCharIndexAt(x: Float, y: Float): Int {
+        val layout = layout ?: return 0
+        val tx = (x - totalPaddingLeft).coerceAtLeast(0f)
+        val ty = (y - totalPaddingTop + scrollY).coerceAtLeast(0f)
+        val line = layout.getLineForVertical(ty.toInt())
+        return layout.getOffsetForHorizontal(line, tx).coerceIn(0, rawText.length)
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        val offset = getCharIndexAt(event.x, event.y)
+        val currentMin = min(selStart, selEnd)
+        val currentMax = max(selStart, selEnd)
+
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                downX = event.rawX
+                downY = event.rawY
+                parent?.requestDisallowInterceptTouchEvent(true)
+
+                // 이미 부분 선택된 구간 내부를 터치한 경우 -> 끌면 바로 다른 앱으로 글로벌 드래그 발동!
+                // 전체 선택 상태이거나 선택 구간 바깥을 터치한 경우 -> 새로운 영역 드래그 지정 시작!
+                val isPartialSelected = (currentMax > currentMin) && !(currentMin == 0 && currentMax == rawText.length)
+                if (isPartialSelected && offset in currentMin..currentMax) {
+                    isHoldingHighlighted = true
+                    isDraggingSelection = false
+                } else {
+                    isHoldingHighlighted = false
+                    isDraggingSelection = true
+                    anchorOffset = offset
+                    selStart = offset
+                    selEnd = (offset + 1).coerceAtMost(rawText.length)
+                    updateHighlight()
+                }
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val moveDist = hypot((event.rawX - downX).toDouble(), (event.rawY - downY).toDouble())
+                if (isHoldingHighlighted && moveDist > dp(10f)) {
+                    isHoldingHighlighted = false
+                    onStartGlobalDrag(getSelectedText())
+                    return true
+                }
+                if (isDraggingSelection && anchorOffset >= 0) {
+                    selStart = min(anchorOffset, offset)
+                    selEnd = max(anchorOffset, offset)
+                    if (selStart == selEnd && selEnd < rawText.length) {
+                        selEnd += 1
+                    }
+                    updateHighlight()
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (isHoldingHighlighted) {
+                    // 하이라이트 영역을 짧게 탭하면 그 자리에서 새 구간 선택 시작점으로 전환
+                    anchorOffset = offset
+                    selStart = offset
+                    selEnd = (offset + 1).coerceAtMost(rawText.length)
+                    updateHighlight()
+                }
+                isDraggingSelection = false
+                isHoldingHighlighted = false
+                return true
+            }
+        }
+        return super.onTouchEvent(event)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val l = layout ?: return
+        val s = min(selStart, selEnd).coerceIn(0, rawText.length)
+        val e = max(selStart, selEnd).coerceIn(0, rawText.length)
+        if (e <= s) return
+
+        // 시작/끝 선택 물방울 핸들(Selection Handles) 시각화
+        val startLine = l.getLineForOffset(s)
+        val startX = l.getPrimaryHorizontal(s) + totalPaddingLeft
+        val startBottom = l.getLineBottom(startLine) + totalPaddingTop - scrollY
+
+        val endLine = l.getLineForOffset(e)
+        val endX = l.getPrimaryHorizontal(e) + totalPaddingLeft
+        val endBottom = l.getLineBottom(endLine) + totalPaddingTop - scrollY
+
+        val r = dp(5.5f).toFloat()
+        canvas.drawCircle(startX, startBottom + r, r, handlePaint)
+        canvas.drawCircle(endX, endBottom + r, r, handlePaint)
+    }
+}

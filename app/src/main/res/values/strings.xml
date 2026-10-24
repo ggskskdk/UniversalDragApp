@@ -1,3 +1,3 @@
 <resources>
-    <string name="acc_description">챗GPT·클로드 텍스트 추출 및 X(트위터) 등 드롭 미지원 앱 강제 드롭(Force-Drop)을 활성화합니다.</string>
+    <string name="acc_description">화면 아이콘 없이 텍스트 영역 드래그 선택 및 이미지·영상·파일 크로스 앱 드래그 앤 드롭을 수행합니다.</string>
 </resources>

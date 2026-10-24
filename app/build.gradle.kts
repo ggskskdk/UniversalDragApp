@@ -9,10 +9,10 @@ android {
 
     defaultConfig {
         applicationId = "com.tools.universaldrag"
-        minSdk = 29
+        minSdk = 30
         targetSdk = 35
-        versionCode = 2
-        versionName = "2.0.0-ForceDrop"
+        versionCode = 3
+        versionName = "3.0.0-UniversalMediaAndRange"
     }
 
     buildTypes {
@@ -32,4 +32,5 @@ android {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.draganddrop:draganddrop:1.0.0")
 }
