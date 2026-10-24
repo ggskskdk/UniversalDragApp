@@ -2,8 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- 모든 파일/영상/이미지 접근 및 타겟 채팅앱 패키지 쿼리 권한 -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
@@ -12,7 +13,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="Universal Drag 3.0"
+        android:label="Universal Drag 4.0"
         android:requestLegacyExternalStorage="true"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
@@ -26,7 +27,6 @@
             </intent-filter>
         </activity>
 
-        <!-- 텍스트 선택 플로팅 툴바 연동 -->
         <activity
             android:name=".ProcessTextActivity"
             android:exported="true"
@@ -39,11 +39,11 @@
             </intent-filter>
         </activity>
 
-        <!-- 어떤 앱에서든 이미지/영상/모든 파일(*/*)을 길게 눌러 '공유 -> 드래그 앤 드롭' 시 즉시 드래그 섀도우로 변환 -->
+        <!-- 모든 앱에서 공유 -> '⚡ 원본 드래그' 선택 시 무손실 원본 해상도/포맷 그대로 드래그 시작 -->
         <activity
             android:name=".ShareReceiveActivity"
             android:exported="true"
-            android:label="⚡ 드래그 앤 드롭"
+            android:label="⚡ 원본 드래그"
             android:theme="@android:style/Theme.Translucent.NoTitleBar">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
@@ -52,7 +52,6 @@
             </intent-filter>
         </activity>
 
-        <!-- 앱 간 이미지/영상/파일 URI 드래그(DRAG_FLAG_GLOBAL_URI_READ)를 위한 FileProvider -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -63,7 +62,6 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
-        <!-- 상시 아이콘 없이 롱프레스만 감지하는 핵심 접근성 서비스 -->
         <service
             android:name=".UniversalDragService"
             android:exported="true"

@@ -1,4 +1,4 @@
-name: Build UniversalDrag v3 APK
+name: Build UniversalDrag v4 APK
 on:
   push:
   workflow_dispatch:
@@ -22,5 +22,5 @@ jobs:
       - name: Upload Compiled APK
         uses: actions/upload-artifact@v4
         with:
-          name: UniversalDrag-v3-apk
+          name: UniversalDrag-v4-OriginalMedia-apk
           path: app/build/outputs/apk/debug/app-debug.apk
