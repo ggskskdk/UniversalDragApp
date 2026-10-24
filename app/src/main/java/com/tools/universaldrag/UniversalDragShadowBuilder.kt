@@ -5,11 +5,6 @@ import android.graphics.*
 import android.text.TextPaint
 import android.view.View
 
-/**
- * [v4.0 핵심]
- * - 이미지/영상 드래그 시 네모 박스에 강제로 구겨 넣지 않고, 원본 가로·세로 비율(Aspect Ratio) 100% 그대로 렌더링
- * - 하단 캡슐에 원본 실제 해상도(예: 3024×4032 • 원본) 표시
- */
 class UniversalDragShadowBuilder(
     context: Context,
     private val titleBadge: String,
@@ -71,7 +66,6 @@ class UniversalDragShadowBuilder(
         val radius = 14f * density
 
         if (previewBitmap != null && !previewBitmap.isRecycled) {
-            // 원본 비율 그대로 둥근 모서리 클리핑 렌더링 (여백/찌그러짐 제로)
             val clipPath = Path().apply {
                 addRoundRect(rect, radius, radius, Path.Direction.CW)
             }
@@ -83,7 +77,6 @@ class UniversalDragShadowBuilder(
 
             canvas.drawRoundRect(rect, radius, radius, borderPaint)
 
-            // 하단에 원본 해상도 배지 오버레이
             val badgeH = 22f * density
             val badgeRect = RectF(
                 rect.left + 8f * density,

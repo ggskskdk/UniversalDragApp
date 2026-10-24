@@ -2,7 +2,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
@@ -13,7 +12,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="Universal Drag 4.0"
+        android:label="Universal Drag"
         android:requestLegacyExternalStorage="true"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
@@ -39,7 +38,7 @@
             </intent-filter>
         </activity>
 
-        <!-- 모든 앱에서 공유 -> '⚡ 원본 드래그' 선택 시 무손실 원본 해상도/포맷 그대로 드래그 시작 -->
+        <!-- 이미지/영상/파일을 길게 눌러 [공유 -> ⚡ 원본 드래그] 선택 시 원본 해상도 그대로 드래그 -->
         <activity
             android:name=".ShareReceiveActivity"
             android:exported="true"

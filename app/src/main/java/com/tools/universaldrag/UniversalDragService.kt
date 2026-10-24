@@ -22,8 +22,6 @@ import android.webkit.MimeTypeMap
 import android.widget.*
 import java.io.File
 import java.io.InputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -68,6 +66,25 @@ class UniversalDragService : AccessibilityService() {
 
     private val autoDismissRunnable = Runnable { removeActiveOverlay() }
 
+    /**
+     * [수정 3] 바탕화면(One UI 홈 등 모든 런처), 시스템 UI, 키보드, 설정 앱에서는
+     * 아이콘을 꾹 눌러도 절대 팝업이 뜨지 않도록 패키지 블랙리스트 적용
+     */
+    private val ignoredPackages = mutableSetOf(
+        "com.sec.android.app.launcher",         // 삼성 One UI 홈 화면
+        "com.google.android.apps.nexuslauncher",// 픽셀 런처
+        "com.teslacoilsw.launcher",             // 노바 런처
+        "com.microsoft.launcher",               // MS 런처
+        "com.android.systemui",                 // 상단바 / 네비게이션바 / 시스템 UI
+        "com.android.settings",                 // 안드로이드 설정
+        "com.samsung.android.honeyboard",       // 삼성 키보드
+        "com.google.android.inputmethod.latin", // Gboard
+        "com.samsung.android.app.cocktailbarservice", // 엣지 패널
+        "com.sec.android.app.quicktool",
+        "com.samsung.android.app.galaxyfinder",
+        "com.sec.android.daemonapp"
+    )
+
     private val fileExtensions = listOf(
         ".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic",
         ".mp4", ".mov", ".mkv", ".webm", ".avi",
@@ -87,20 +104,25 @@ class UniversalDragService : AccessibilityService() {
     }
 
     /**
-     * 브라우저/앱에서 '이미지 복사' 시 클립보드에 들어오는 원본 이미지 URI를 즉시 감지하여 무손실 드래그 캡슐로 표시
+     * 사용자가 명시적으로 '이미지 복사'를 눌렀을 때만 클립보드의 이미지 URI를 감지하여 띄움
      */
     private val clipListener = ClipboardManager.OnPrimaryClipChangedListener {
         if (internalClipChange) {
             internalClipChange = false
             return@OnPrimaryClipChangedListener
         }
+        val currentPkg = rootInActiveWindow?.packageName?.toString() ?: ""
+        if (isIgnoredPackage(currentPkg)) return@OnPrimaryClipChangedListener
+
         val clip = clipboardManager.primaryClip ?: return@OnPrimaryClipChangedListener
         if (clip.itemCount > 0) {
             val item = clip.getItemAt(0)
             val clipUri = item.uri
             if (clipUri != null) {
-                val mime = contentResolver.getType(clipUri) ?: clip.description.getMimeType(0) ?: "image/*"
-                handleSharedUri(clipUri, mime)
+                val mime = contentResolver.getType(clipUri) ?: clip.description.getMimeType(0) ?: ""
+                if (mime.startsWith("image/") || mime.startsWith("video/")) {
+                    handleSharedUri(clipUri, mime)
+                }
             }
         }
     }
@@ -111,16 +133,43 @@ class UniversalDragService : AccessibilityService() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         clipboardManager = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboardManager.addPrimaryClipChangedListener(clipListener)
+        refreshLauncherBlacklist()
         setupDragLocationTracker()
+    }
+
+    /**
+     * 기기에 설치된 모든 홈 런처 패키지를 동적으로 조회하여 블랙리스트에 추가
+     */
+    private fun refreshLauncherBlacklist() {
+        runCatching {
+            val homeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+            val resolveInfos = packageManager.queryIntentActivities(homeIntent, PackageManager.MATCH_ALL)
+            for (info in resolveInfos) {
+                info.activityInfo?.packageName?.let { ignoredPackages.add(it) }
+            }
+        }
+    }
+
+    private fun isIgnoredPackage(pkg: String): Boolean {
+        if (pkg.isEmpty() || pkg == packageName) return true
+        if (ignoredPackages.contains(pkg)) return true
+        if (pkg.contains("launcher", ignoreCase = true) || pkg.contains("systemui", ignoreCase = true) || pkg.contains("inputmethod", ignoreCase = true)) {
+            return true
+        }
+        return false
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null || isGlobalDragging) return
-        if (event.packageName?.toString() == packageName) return
+        val pkgName = event.packageName?.toString() ?: ""
+
+        // 홈 화면(바탕화면), 시스템 UI, 키보드 등에서는 모든 이벤트 즉시 무시!
+        if (isIgnoredPackage(pkgName)) return
 
         val now = System.currentTimeMillis()
 
         when (event.eventType) {
+            // 1. 일반 텍스트 드래그 블록 선택 시
             AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED -> {
                 val source = event.source ?: return
                 val fullText = source.text?.toString() ?: return
@@ -128,7 +177,7 @@ class UniversalDragService : AccessibilityService() {
                 val end = event.toIndex
                 if (start >= 0 && end > start && end <= fullText.length) {
                     val selected = fullText.substring(start, end).trim()
-                    if (selected.isNotEmpty()) {
+                    if (selected.length >= 2) {
                         val rect = Rect()
                         source.getBoundsInScreen(rect)
                         lastEventTimestamp = now
@@ -141,11 +190,11 @@ class UniversalDragService : AccessibilityService() {
                 }
             }
 
+            // 2. 롱프레스(꾹 누르기) 시
             AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> {
-                if (now - lastEventTimestamp < 350) return
-                lastEventTimestamp = now
-                val source = event.source ?: rootInActiveWindow ?: return
-                handleLongPressedNode(source, event.packageName?.toString() ?: "")
+                if (now - lastEventTimestamp < 400) return
+                val source = event.source ?: return
+                handleLongPressedNode(source, pkgName, now)
             }
         }
     }
@@ -164,160 +213,139 @@ class UniversalDragService : AccessibilityService() {
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, resources.displayMetrics).toInt()
 
     /**
-     * [v4.0 롱프레스 지능형 분기]
-     * 1. 비디오 플레이어 / 갤러리 / 최근 미디어인지 확인 -> 원본 비디오/이미지 MediaStore URI 직결
-     * 2. 이미지/영상 원본 URL(http/https) 포함 여부 확인 -> 원본 고해상도 스트림 다운로드
-     * 3. 텍스트 노드인 경우 -> 드래그 영역 지정 창 표시
-     * 4. 순수 이미지 뷰인 경우 -> 최근 원본 MediaStore 매칭 또는 여백 자동 제거(Auto-Trim) 무손실 추출
+     * [v5.0 정밀 롱프레스 필터]
+     * - 버튼, 아이콘, 탭 바, 빈 배경에서는 절대 발동하지 않음
+     * - 갤러리와 무관한 엉뚱한 최근 이미지(1523x491 등)를 불러오는 폴백 코드 100% 제거 완료
      */
-    private fun handleLongPressedNode(node: AccessibilityNodeInfo, pkgName: String) {
+    private fun handleLongPressedNode(node: AccessibilityNodeInfo, pkgName: String, timestamp: Long) {
         val rect = Rect()
         node.getBoundsInScreen(rect)
         val clsName = node.className?.toString() ?: ""
-        val contentDesc = node.contentDescription?.toString() ?: ""
 
-        // A. 비디오 뷰이거나 설명에 '동영상/Video'가 포함된 경우 -> 즉시 최신 원본 동영상 MediaStore URI 매칭!
-        val looksLikeVideo = clsName.contains("Video", true) ||
-                clsName.contains("Player", true) ||
-                clsName.contains("SurfaceView", true) ||
-                clsName.contains("TextureView", true) ||
-                contentDesc.contains("동영상") ||
-                contentDesc.contains("Video", true)
+        // 1. 버튼, 아이콘, 탭, 스위치, 상하단 바 등 UI 컨트롤이면 무조건 무시!
+        if (isUiControlOrIcon(node, clsName, rect)) return
 
-        if (looksLikeVideo) {
-            val latestVideo = queryLatestMediaStoreItem(preferVideo = true)
-            if (latestVideo != null) {
-                showQuickDragPill(latestVideo, rect.centerX(), rect.centerY())
-                return
+        // 2. 내 파일 / 문서 앱에서 실제 파일 항목(.mp4, .jpg, .pdf, .zip 등)을 꾹 누른 경우에만 원본 파일 매칭
+        val directOrChildText = extractGenuineContentText(node)
+        if (!directOrChildText.isNullOrBlank()) {
+            if (pkgName.contains("myfiles", true) || pkgName.contains("documentsui", true) || pkgName.contains("file", true)) {
+                val matchedFile = tryResolveFileFromText(directOrChildText)
+                if (matchedFile != null) {
+                    lastEventTimestamp = timestamp
+                    prepareOriginalFilePayload(matchedFile, rect.centerX(), rect.centerY())
+                    return
+                }
             }
-        }
 
-        // B. 갤러리 / 내파일 / 포토 앱에서 롱프레스한 경우 -> MediaStore에서 원본 해상도 파일 직결!
-        if (pkgName.contains("gallery", true) || pkgName.contains("photos", true) || pkgName.contains("documentsui", true) || pkgName.contains("myfiles", true)) {
-            val matched = findMediaByNodeMetadata(node) ?: queryLatestMediaStoreItem(preferVideo = false)
-            if (matched != null) {
-                showQuickDragPill(matched, rect.centerX(), rect.centerY())
-                return
+            // 3. 본문 텍스트인 경우 (최소 2글자 이상 & 단순 아이콘 라벨 제외) -> 텍스트 드래그 영역 지정 창 오픈
+            if (directOrChildText.length >= 2 && !isSingleWordIconLabel(node, directOrChildText, rect)) {
+                lastEventTimestamp = timestamp
+                showTextSelectionAndDragOverlay(directOrChildText, rect)
             }
-        }
-
-        // C. 텍스트 및 파일명 추출 검사
-        val extractedText = extractNodeTextDeep(node)
-        if (!extractedText.isNullOrBlank()) {
-            // 파일명이 포함된 경우 실제 원본 파일 매칭
-            val matchedFile = tryResolveFileFromText(extractedText)
-            if (matchedFile != null) {
-                prepareOriginalFilePayload(matchedFile, rect.centerX(), rect.centerY())
-                return
-            }
-            // 이미지/미디어 직접 URL인 경우 원본 다운로드
-            if (extractedText.startsWith("http") && (extractedText.contains("twimg.com") || fileExtensions.any { extractedText.lowercase().contains(it) })) {
-                downloadOriginalUrlToMediaStore(extractedText, rect.centerX(), rect.centerY())
-                return
-            }
-            // 일반 텍스트(챗GPT, 클로드, X 본문 등) -> 드래그 영역 지정 오버레이 오픈
-            showTextSelectionAndDragOverlay(extractedText, rect)
             return
         }
 
-        // D. 텍스트가 없는 이미지/미디어 뷰 롱프레스 -> 무손실 원본 비율 추출 + [원본 파일 전환] 버튼 제공
-        val mediaRect = findBestMediaBounds(node, rect)
-        if (mediaRect.width() > dp(32f) && mediaRect.height() > dp(32f)) {
-            captureLosslessTrimmedImage(mediaRect)
+        // 4. 텍스트가 없는 경우: 반드시 실제 대형 콘텐츠 ImageView(가로·세로 130dp 이상)일 때만 해당 이미지 영역 캡처
+        //    (실패하더라도 절대 갤러리의 이전 스크린샷을 불러오지 않음!)
+        if (isGenuineLargeContentImage(node, clsName, rect)) {
+            lastEventTimestamp = timestamp
+            captureLosslessTrimmedImage(rect)
         }
     }
 
     /**
-     * [원본 해상도/비율 보장 1]
-     * MediaStore에서 가장 최근 저장/열람된 원본 영상 또는 원본 이미지의 시스템 URI(content://media/external/...)와 원본 해상도를 그대로 가져옴
+     * 버튼, 툴바 아이콘, 앱 아이콘, 아바타 등 일반 UI 요소인지 판별
      */
-    private fun queryLatestMediaStoreItem(preferVideo: Boolean): DragPayload? {
-        runCatching {
-            val collection = if (preferVideo) {
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-            } else {
-                MediaStore.Files.getContentUri("external")
-            }
-
-            val selection = if (preferVideo) {
-                null
-            } else {
-                "${MediaStore.Files.FileColumns.MEDIA_TYPE}=${MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE} OR ${MediaStore.Files.FileColumns.MEDIA_TYPE}=${MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO}"
-            }
-
-            val projection = arrayOf(
-                MediaStore.MediaColumns._ID,
-                MediaStore.MediaColumns.DISPLAY_NAME,
-                MediaStore.MediaColumns.MIME_TYPE,
-                MediaStore.MediaColumns.WIDTH,
-                MediaStore.MediaColumns.HEIGHT,
-                MediaStore.MediaColumns.DATA
-            )
-
-            contentResolver.query(
-                collection,
-                projection,
-                selection,
-                null,
-                "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
-            )?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val id = cursor.getLong(0)
-                    val name = cursor.getString(1) ?: "media"
-                    val mime = cursor.getString(2) ?: if (preferVideo) "video/mp4" else "image/jpeg"
-                    var w = cursor.getInt(3)
-                    var h = cursor.getInt(4)
-                    val isVideo = mime.startsWith("video/")
-
-                    val baseUri = if (isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-                    val contentUri = ContentUris.withAppendedId(baseUri, id)
-
-                    val preview = if (isVideo) {
-                        extractVideoFrameAndSize(contentUri)?.also {
-                            if (w == 0 || h == 0) {
-                                w = it.second
-                                h = it.third
-                            }
-                        }?.first
-                    } else {
-                        decodeSampledPreview(contentUri)?.also {
-                            if (w == 0 || h == 0) {
-                                w = it.second
-                                h = it.third
-                            }
-                        }?.first
-                    }
-
-                    return DragPayload(
-                        type = if (isVideo) PayloadType.VIDEO else PayloadType.IMAGE,
-                        uri = contentUri,
-                        mimeType = mime,
-                        displayName = name,
-                        origWidth = w,
-                        origHeight = h,
-                        previewBitmap = preview
-                    )
-                }
-            }
+    private fun isUiControlOrIcon(node: AccessibilityNodeInfo, clsName: String, rect: Rect): Boolean {
+        val lowerCls = clsName.lowercase()
+        if (lowerCls.contains("button") ||
+            lowerCls.contains("checkbox") ||
+            lowerCls.contains("switch") ||
+            lowerCls.contains("tab") ||
+            lowerCls.contains("toolbar") ||
+            lowerCls.contains("actionmenu") ||
+            lowerCls.contains("navigation")
+        ) {
+            return true
         }
-        return null
-    }
-
-    private fun findMediaByNodeMetadata(node: AccessibilityNodeInfo): DragPayload? {
-        val desc = (node.contentDescription?.toString() ?: "") + " " + (node.text?.toString() ?: "")
-        val matchedFile = tryResolveFileFromText(desc)
-        if (matchedFile != null) {
-            return buildPayloadFromFile(matchedFile)
+        // 상태바 또는 하단 네비게이션 제스처 영역 근처 무시
+        val screenH = resources.displayMetrics.heightPixels
+        if (rect.top < dp(36f) || rect.bottom > screenH - dp(42f)) {
+            return true
         }
-        return null
+        return false
     }
 
     /**
-     * [원본 해상도/비율 보장 2]
-     * 화면에서 직접 추출해야 하는 경우:
-     * 1. 절대 임의로 축소/리사이즈하지 않고 원본 1:1 픽셀 유지
-     * 2. 상하좌우 레터박스(검은 여백/흰 여백/배경색)를 자동으로 감지해 도려내는 Auto-Trim 알고리즘 적용
-     * 3. 모든 채팅앱이 즉시 수용하는 시스템 MediaStore URI(content://media/external/images/media/...)로 등록
+     * 앱 아이콘이나 하단 탭처럼 작은 영역에 짧은 단어 하나만 있는 라벨인지 판별
+     */
+    private fun isSingleWordIconLabel(node: AccessibilityNodeInfo, text: String, rect: Rect): Boolean {
+        if (text.length <= 10 && !text.contains(" ") && rect.width() < dp(95f) && rect.height() < dp(95f)) {
+            return true
+        }
+        return false
+    }
+
+    /**
+     * 화면 전체 컨테이너나 작은 아이콘이 아닌, 실제 본문 내 대형 이미지(ImageView / PhotoView)인지 엄격히 검증
+     */
+    private fun isGenuineLargeContentImage(node: AccessibilityNodeInfo, clsName: String, rect: Rect): Boolean {
+        val screenW = resources.displayMetrics.widthPixels
+        val screenH = resources.displayMetrics.heightPixels
+
+        // 너무 작은 아이콘(130dp 미만)이거나 화면 전체 배경(화면 높이의 88% 이상)이면 이미지가 아님
+        if (rect.width() < dp(130f) || rect.height() < dp(130f)) return false
+        if (rect.height() > (screenH * 0.88f).toInt() && rect.width() >= (screenW * 0.98f).toInt()) return false
+
+        // 자식 노드가 여러 개 들어있는 레이아웃 컨테이너(FrameLayout, LinearLayout, RecyclerView 등)는 이미지가 아님
+        if (node.childCount > 1) return false
+
+        val lowerCls = clsName.lowercase()
+        return lowerCls.contains("imageview") ||
+               lowerCls.contains("photoview") ||
+               lowerCls.contains("subsamplingscaleimageview") ||
+               lowerCls.contains("draweeview") ||
+               lowerCls.contains("image")
+    }
+
+    private fun extractGenuineContentText(node: AccessibilityNodeInfo?): String? {
+        if (node == null) return null
+        val screenH = resources.displayMetrics.heightPixels
+        val r = Rect()
+        node.getBoundsInScreen(r)
+
+        // 만약 이벤트 소스가 화면 전체를 덮는 최상위 루트 레이아웃이면 전체 화면 텍스트를 긁어오지 않도록 차단
+        if (r.height() > (screenH * 0.85f).toInt() && node.childCount > 3) {
+            return null
+        }
+
+        val direct = node.text?.toString()?.trim()
+        if (!direct.isNullOrEmpty()) return direct
+
+        val builder = StringBuilder()
+        var textNodeCount = 0
+        fun traverse(n: AccessibilityNodeInfo?, depth: Int) {
+            if (n == null || depth > 5 || textNodeCount > 8) return
+            val cls = n.className?.toString()?.lowercase() ?: ""
+            if (cls.contains("button") || cls.contains("toolbar")) return
+
+            val t = n.text?.toString()?.trim()
+            if (!t.isNullOrEmpty()) {
+                if (builder.isNotEmpty()) builder.append("\n")
+                builder.append(t)
+                textNodeCount++
+            }
+            for (i in 0 until n.childCount) {
+                traverse(n.getChild(i), depth + 1)
+            }
+        }
+        traverse(node, 0)
+        return if (builder.isNotEmpty()) builder.toString() else null
+    }
+
+    /**
+     * 실제 대형 ImageView를 꾹 눌렀을 때만 해당 뷰 영역을 크롭하며,
+     * 실패 시 절대 갤러리의 엉뚱한 이전 이미지(queryLatestMediaStoreItem)를 띄우지 않음!
      */
     private fun captureLosslessTrimmedImage(cropRect: Rect) {
         takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
@@ -336,10 +364,9 @@ class UniversalDragService : AccessibilityService() {
                             val height = cropRect.height().coerceIn(1, swBitmap.height - top)
 
                             val rawCrop = Bitmap.createBitmap(swBitmap, left, top, width, height)
-                            // 상하좌우 불필요한 네모 여백(레터박스) 자동 제거 -> 순수 원본 이미지 비율 복원!
                             val trimmed = trimUniformBorders(rawCrop)
 
-                            val fileName = "OrigDrag_${System.currentTimeMillis()}.png"
+                            val fileName = "DragImage_${System.currentTimeMillis()}.png"
                             val mediaUri = insertBitmapIntoMediaStore(trimmed, fileName, "image/png")
 
                             if (mediaUri != null) {
@@ -364,30 +391,20 @@ class UniversalDragService : AccessibilityService() {
             }
 
             override fun onFailure(errorCode: Int) {
-                // 캡처 쿨타임 시 즉시 최신 MediaStore 원본으로 폴백
-                val latest = queryLatestMediaStoreItem(preferVideo = false)
-                if (latest != null) {
-                    showQuickDragPill(latest, cropRect.centerX(), cropRect.centerY())
-                }
+                // 아무것도 띄우지 않음 (엉뚱한 이전 캡처 이미지가 뜨던 현상 완전 제거)
             }
         })
     }
 
-    /**
-     * [핵심 알고리즘]
-     * 네모난 ImageView 컨테이너 안에 상하(또는 좌우) 여백이 포함된 경우,
-     * 단색 배경/레터박스 라인을 스캔하여 잘라내고 실제 이미지의 원본 비율과 크롭 영역만 정확히 추출
-     */
     private fun trimUniformBorders(src: Bitmap): Bitmap {
         val w = src.width
         val h = src.height
         if (w < 60 || h < 60) return src
 
         fun colorDist(c1: Int, c2: Int): Int {
-            val dr = abs(Color.red(c1) - Color.red(c2))
-            val dg = abs(Color.green(c1) - Color.green(c2))
-            val db = abs(Color.blue(c1) - Color.blue(c2))
-            return dr + dg + db
+            return abs(Color.red(c1) - Color.red(c2)) +
+                   abs(Color.green(c1) - Color.green(c2)) +
+                   abs(Color.blue(c1) - Color.blue(c2))
         }
 
         fun isRowUniform(y: Int, refColor: Int): Boolean {
@@ -420,27 +437,19 @@ class UniversalDragService : AccessibilityService() {
 
         val topColor = src.getPixel(w / 2, 2)
         var top = 0
-        while (top < h * 0.42f && isRowUniform(top, topColor)) {
-            top += 2
-        }
+        while (top < h * 0.42f && isRowUniform(top, topColor)) top += 2
 
         val bottomColor = src.getPixel(w / 2, h - 3)
         var bottom = h - 1
-        while (bottom > h * 0.58f && isRowUniform(bottom, bottomColor)) {
-            bottom -= 2
-        }
+        while (bottom > h * 0.58f && isRowUniform(bottom, bottomColor)) bottom -= 2
 
         val leftColor = src.getPixel(2, (top + bottom) / 2)
         var left = 0
-        while (left < w * 0.42f && isColUniform(left, leftColor, top, bottom)) {
-            left += 2
-        }
+        while (left < w * 0.42f && isColUniform(left, leftColor, top, bottom)) left += 2
 
         val rightColor = src.getPixel(w - 3, (top + bottom) / 2)
         var right = w - 1
-        while (right > w * 0.58f && isColUniform(right, rightColor, top, bottom)) {
-            right -= 2
-        }
+        while (right > w * 0.58f && isColUniform(right, rightColor, top, bottom)) right -= 2
 
         val newW = (right - left + 1).coerceAtLeast(1)
         val newH = (bottom - top + 1).coerceAtLeast(1)
@@ -453,48 +462,7 @@ class UniversalDragService : AccessibilityService() {
     }
 
     /**
-     * X(트위터)나 웹 이미지 URL 감지 시 최고 화질(?name=orig) 원본 스트림을 다운로드하여 MediaStore에 등록
-     */
-    private fun downloadOriginalUrlToMediaStore(rawUrl: String, cx: Int, cy: Int) {
-        ioExecutor.execute {
-            runCatching {
-                val highResUrl = if (rawUrl.contains("pbs.twimg.com/media/")) {
-                    rawUrl.replace(Regex("name=[a-zA-Z0-9_]+"), "name=orig")
-                } else rawUrl
-
-                val conn = (URL(highResUrl).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 5000
-                    readTimeout = 7000
-                    doInput = true
-                    connect()
-                }
-                val contentType = conn.contentType ?: "image/jpeg"
-                val bytes = conn.inputStream.use { it.readBytes() }
-                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                if (bmp != null) {
-                    val ext = if (contentType.contains("png")) "png" else "jpg"
-                    val name = "OrigWeb_${System.currentTimeMillis()}.$ext"
-                    val uri = insertStreamOrBytesIntoMediaStore(bytes, name, contentType, bmp.width, bmp.height, isVideo = false)
-                    if (uri != null) {
-                        val payload = DragPayload(
-                            type = PayloadType.IMAGE,
-                            uri = uri,
-                            mimeType = contentType,
-                            displayName = name,
-                            origWidth = bmp.width,
-                            origHeight = bmp.height,
-                            previewBitmap = createAspectRatioPreview(bmp, 480)
-                        )
-                        mainHandler.post { showQuickDragPill(payload, cx, cy) }
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * 공유 인텐트(ShareReceiveActivity) 또는 클립보드에서 들어온 원본 이미지/영상/파일 URI를
-     * 리사이즈나 재압축 없이 100% 원본 바이트 그대로 MediaStore URI로 바인딩
+     * 사용자가 명시적으로 공유(⚡ 원본 드래그)하거나 복사한 실제 원본 미디어 URI 처리
      */
     fun handleSharedUri(sourceUri: Uri, mimeType: String?) {
         ioExecutor.execute {
@@ -503,7 +471,6 @@ class UniversalDragService : AccessibilityService() {
                 val isVideo = resolvedMime.startsWith("video/")
                 val isImage = resolvedMime.startsWith("image/")
 
-                // 이미 MediaStore URI인 경우 복사조차 하지 않고 원본 URI 직결!
                 if (sourceUri.authority == MediaStore.AUTHORITY) {
                     val meta = if (isVideo) extractVideoFrameAndSize(sourceUri) else decodeSampledPreview(sourceUri)
                     val payload = DragPayload(
@@ -525,7 +492,6 @@ class UniversalDragService : AccessibilityService() {
                     return@runCatching
                 }
 
-                // 외부 앱의 임시 URI인 경우 원본 바이트 스트림을 그대로(무손실 1:1) MediaStore에 등록
                 val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(resolvedMime)
                     ?: if (isVideo) "mp4" else if (isImage) "png" else "bin"
                 val fileName = "Original_${System.currentTimeMillis()}.$ext"
@@ -615,9 +581,6 @@ class UniversalDragService : AccessibilityService() {
         }.getOrNull()
     }
 
-    /**
-     * [핵심] 타겟 채팅앱이 100% 신뢰하고 즉시 첨부하는 시스템 MediaStore URI 생성기 (무손실 원본 저장)
-     */
     private fun insertBitmapIntoMediaStore(bitmap: Bitmap, displayName: String, mimeType: String): Uri? {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
@@ -629,35 +592,8 @@ class UniversalDragService : AccessibilityService() {
         }
         val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
         contentResolver.openOutputStream(uri)?.use { out ->
-            // PNG 무손실 100% 원본 저장
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
         }
-        values.clear()
-        values.put(MediaStore.MediaColumns.IS_PENDING, 0)
-        contentResolver.update(uri, values, null, null)
-        return uri
-    }
-
-    private fun insertStreamOrBytesIntoMediaStore(
-        bytes: ByteArray,
-        displayName: String,
-        mimeType: String,
-        w: Int,
-        h: Int,
-        isVideo: Boolean
-    ): Uri? {
-        val collection = if (isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        val relPath = if (isVideo) Environment.DIRECTORY_MOVIES + "/UniversalDrag" else Environment.DIRECTORY_PICTURES + "/UniversalDrag"
-        val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-            if (w > 0) put(MediaStore.MediaColumns.WIDTH, w)
-            if (h > 0) put(MediaStore.MediaColumns.HEIGHT, h)
-            put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
-            put(MediaStore.MediaColumns.IS_PENDING, 1)
-        }
-        val uri = contentResolver.insert(collection, values) ?: return null
-        contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
         values.clear()
         values.put(MediaStore.MediaColumns.IS_PENDING, 0)
         contentResolver.update(uri, values, null, null)
@@ -692,9 +628,7 @@ class UniversalDragService : AccessibilityService() {
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         val uri = contentResolver.insert(collection, values) ?: return null
-        contentResolver.openOutputStream(uri)?.use { out ->
-            input.copyTo(out)
-        }
+        contentResolver.openOutputStream(uri)?.use { out -> input.copyTo(out) }
         values.clear()
         values.put(MediaStore.MediaColumns.IS_PENDING, 0)
         contentResolver.update(uri, values, null, null)
@@ -707,9 +641,7 @@ class UniversalDragService : AccessibilityService() {
         if (w <= 0 || h <= 0) return src
         if (w <= maxEdge && h <= maxEdge) return src
         val scale = minOf(maxEdge.toFloat() / w, maxEdge.toFloat() / h)
-        val nw = (w * scale).toInt().coerceAtLeast(1)
-        val nh = (h * scale).toInt().coerceAtLeast(1)
-        return Bitmap.createScaledBitmap(src, nw, nh, true)
+        return Bitmap.createScaledBitmap(src, (w * scale).toInt().coerceAtLeast(1), (h * scale).toInt().coerceAtLeast(1), true)
     }
 
     private fun decodeSampledPreview(uri: Uri): Triple<Bitmap, Int, Int>? {
@@ -721,9 +653,7 @@ class UniversalDragService : AccessibilityService() {
             if (origW <= 0 || origH <= 0) return null
 
             var sampleSize = 1
-            while (origW / sampleSize > 600 || origH / sampleSize > 600) {
-                sampleSize *= 2
-            }
+            while (origW / sampleSize > 600 || origH / sampleSize > 600) sampleSize *= 2
             val decodeOpt = BitmapFactory.Options().apply { inSampleSize = sampleSize }
             val bmp = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decodeOpt) } ?: return null
             Triple(createAspectRatioPreview(bmp, 480), origW, origH)
@@ -738,49 +668,14 @@ class UniversalDragService : AccessibilityService() {
             val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
             val frame = retriever.frameAtTime
             retriever.release()
-            if (frame != null) {
-                Triple(createAspectRatioPreview(frame, 480), w, h)
-            } else null
+            if (frame != null) Triple(createAspectRatioPreview(frame, 480), w, h) else null
         }.getOrNull()
-    }
-
-    private fun extractNodeTextDeep(node: AccessibilityNodeInfo?): String? {
-        if (node == null) return null
-        val direct = node.text?.toString()?.trim()
-        if (!direct.isNullOrEmpty()) return direct
-
-        val builder = StringBuilder()
-        fun traverse(n: AccessibilityNodeInfo?) {
-            if (n == null) return
-            val t = n.text?.toString()?.trim()
-            if (!t.isNullOrEmpty()) {
-                if (builder.isNotEmpty()) builder.append("\n")
-                builder.append(t)
-            }
-            for (i in 0 until n.childCount) traverse(n.getChild(i))
-        }
-        traverse(node)
-        return if (builder.isNotEmpty()) builder.toString() else null
-    }
-
-    private fun findBestMediaBounds(node: AccessibilityNodeInfo, fallbackRect: Rect): Rect {
-        var current: AccessibilityNodeInfo? = node
-        while (current != null) {
-            val r = Rect()
-            current.getBoundsInScreen(r)
-            val cls = current.className?.toString() ?: ""
-            if (cls.contains("Image", true) || cls.contains("Photo", true) || cls.contains("Video", true)) {
-                if (r.width() > dp(40f) && r.height() > dp(40f)) return r
-            }
-            current = current.parent
-        }
-        return fallbackRect
     }
 
     private fun tryResolveFileFromText(text: String): File? {
         val lines = text.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
         val candidateName = lines.firstOrNull { line ->
-            fileExtensions.any { ext -> line.lowercase().contains(ext) }
+            fileExtensions.any { ext -> line.lowercase().endsWith(ext) }
         } ?: return null
 
         val searchDirs = listOf(
@@ -793,7 +688,7 @@ class UniversalDragService : AccessibilityService() {
         for (dir in searchDirs) {
             if (dir != null && dir.exists()) {
                 val found = dir.walkTopDown().maxDepth(3).firstOrNull { f ->
-                    f.isFile && (f.name.equals(candidateName, ignoreCase = true) || candidateName.contains(f.name, ignoreCase = true))
+                    f.isFile && f.name.equals(candidateName, ignoreCase = true)
                 }
                 if (found != null) return found
             }
@@ -801,9 +696,6 @@ class UniversalDragService : AccessibilityService() {
         return null
     }
 
-    /**
-     * 텍스트 드래그 영역 지정 오버레이
-     */
     fun showTextSelectionAndDragOverlay(fullText: String, sourceRect: Rect? = null) {
         mainHandler.post {
             removeActiveOverlay()
@@ -882,7 +774,7 @@ class UniversalDragService : AccessibilityService() {
                     val preview = if (sel.length > 18) sel.take(18).replace("\n", " ") + "…" else sel.replace("\n", " ")
                     dragBar.text = "⠿  \"$preview\" 끌어서 이동 (${sel.length}자)"
                     mainHandler.removeCallbacks(autoDismissRunnable)
-                    mainHandler.postDelayed(autoDismissRunnable, 9000)
+                    mainHandler.postDelayed(autoDismissRunnable, 8000)
                 },
                 onStartGlobalDrag = { sel ->
                     val payload = DragPayload(PayloadType.TEXT, text = sel, displayName = sel)
@@ -891,7 +783,7 @@ class UniversalDragService : AccessibilityService() {
             )
 
             val scrollWrapper = ScrollView(this).apply {
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(160f))
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(155f))
                 addView(selectableView)
             }
 
@@ -926,14 +818,13 @@ class UniversalDragService : AccessibilityService() {
 
             activeOverlayView = rootCard
             windowManager.addView(rootCard, params)
-            mainHandler.postDelayed(autoDismissRunnable, 9000)
+            mainHandler.postDelayed(autoDismissRunnable, 8000)
         }
     }
 
     /**
-     * [v4.0 원본 비율 프리뷰 캡슐]
-     * - 이미지/영상의 원본 가로·세로 비율 그대로 썸네일을 표시하고 원본 해상도(예: 1920×1080) 표기
-     * - 영상 플레이어 위에서 롱프레스했을 때를 위해 우측에 [🎬 최근 원본 영상] 원터치 전환 버튼 탑재
+     * [수정 1 완료]
+     * 불필요한 '방금 본 원본 영상으로 전환' 버튼 제거 및 우측 닫기(✕) 버튼 추가
      */
     fun showQuickDragPill(payload: DragPayload, posX: Int, posY: Int) {
         mainHandler.post {
@@ -943,9 +834,9 @@ class UniversalDragService : AccessibilityService() {
 
             val container = FrameLayout(this)
             val card = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER_HORIZONTAL
-                setPadding(dp(10f), dp(10f), dp(10f), dp(10f))
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12f), dp(10f), dp(12f), dp(10f))
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
                     cornerRadius = dp(18f).toFloat()
@@ -955,19 +846,13 @@ class UniversalDragService : AccessibilityService() {
                 elevation = dp(12f).toFloat()
             }
 
-            val topRow = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-
-            // 원본 비율을 정확히 유지하는 프리뷰 이미지뷰
             if (payload.previewBitmap != null && !payload.previewBitmap.isRecycled) {
                 val bw = payload.previewBitmap.width.toFloat()
                 val bh = payload.previewBitmap.height.toFloat()
-                val maxSide = dp(84f).toFloat()
+                val maxSide = dp(68f).toFloat()
                 val scale = minOf(maxSide / bw, maxSide / bh)
-                val targetW = (bw * scale).toInt().coerceAtLeast(dp(36f))
-                val targetH = (bh * scale).toInt().coerceAtLeast(dp(36f))
+                val targetW = (bw * scale).toInt().coerceAtLeast(dp(34f))
+                val targetH = (bh * scale).toInt().coerceAtLeast(dp(34f))
 
                 val imgView = ImageView(this).apply {
                     setImageBitmap(payload.previewBitmap)
@@ -976,11 +861,11 @@ class UniversalDragService : AccessibilityService() {
                         rightMargin = dp(10f)
                     }
                 }
-                topRow.addView(imgView)
+                card.addView(imgView)
             }
 
             val resInfo = if (payload.origWidth > 0 && payload.origHeight > 0) {
-                "${payload.origWidth}×${payload.origHeight} 원본"
+                "${payload.origWidth}×${payload.origHeight}"
             } else {
                 "원본"
             }
@@ -989,7 +874,7 @@ class UniversalDragService : AccessibilityService() {
                 PayloadType.TEXT -> "⠿ 텍스트 드래그"
                 PayloadType.IMAGE -> "🖼️ 이미지 ($resInfo)"
                 PayloadType.VIDEO -> "🎬 영상 ($resInfo)"
-                PayloadType.FILE -> "📁 파일 (${payload.displayName})"
+                PayloadType.FILE -> "📁 ${payload.displayName}"
             }
 
             val infoCol = LinearLayout(this).apply {
@@ -1006,9 +891,9 @@ class UniversalDragService : AccessibilityService() {
 
             val subTv = TextView(this).apply {
                 text = if (payload.type == PayloadType.TEXT) {
-                    payload.displayName.replace("\n", " ").take(22)
+                    payload.displayName.replace("\n", " ").take(20)
                 } else {
-                    "잡고 다른 앱 채팅창으로 끌어다 놓으세요"
+                    "잡고 다른 앱으로 끌어다 놓으세요"
                 }
                 setTextColor(Color.parseColor("#A5B4FC"))
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
@@ -1016,36 +901,16 @@ class UniversalDragService : AccessibilityService() {
 
             infoCol.addView(titleTv)
             infoCol.addView(subTv)
-            topRow.addView(infoCol)
-            card.addView(topRow)
+            card.addView(infoCol)
 
-            // 이미지 캡슐인 경우 하단에 [🎬 최근 원본 영상으로 전환] 버튼 제공
-            if (payload.type == PayloadType.IMAGE) {
-                val switchVideoBtn = TextView(this).apply {
-                    text = "🎬 방금 본 원본 영상(.mp4)으로 전환"
-                    setTextColor(Color.parseColor("#E0E7FF"))
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                    gravity = Gravity.CENTER
-                    setPadding(dp(10f), dp(5f), dp(10f), dp(5f))
-                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                        topMargin = dp(6f)
-                    }
-                    background = GradientDrawable().apply {
-                        shape = GradientDrawable.RECTANGLE
-                        cornerRadius = dp(8f).toFloat()
-                        setColor(Color.parseColor("#336366F1"))
-                    }
-                    setOnClickListener {
-                        val latestVid = queryLatestMediaStoreItem(preferVideo = true)
-                        if (latestVid != null) {
-                            showQuickDragPill(latestVid, posX, posY)
-                        } else {
-                            Toast.makeText(this@UniversalDragService, "최근 저장된 동영상 파일이 없습니다.", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
-                card.addView(switchVideoBtn)
+            val closeBtn = TextView(this).apply {
+                text = "✕"
+                setTextColor(Color.parseColor("#A1A1AA"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                setPadding(dp(12f), dp(4f), dp(4f), dp(4f))
+                setOnClickListener { removeActiveOverlay() }
             }
+            card.addView(closeBtn)
 
             container.addView(card)
 
@@ -1057,14 +922,14 @@ class UniversalDragService : AccessibilityService() {
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
-                x = (posX - dp(125f)).coerceIn(dp(16f), screenW - dp(260f))
-                y = (posY - dp(70f)).coerceIn(dp(50f), screenH - dp(160f))
+                x = (posX - dp(120f)).coerceIn(dp(16f), screenW - dp(250f))
+                y = (posY - dp(68f)).coerceIn(dp(50f), screenH - dp(150f))
             }
 
             var startX = 0f
             var startY = 0f
 
-            topRow.setOnTouchListener { _, ev ->
+            card.setOnTouchListener { _, ev ->
                 when (ev.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         startX = ev.rawX
@@ -1082,7 +947,7 @@ class UniversalDragService : AccessibilityService() {
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                         if (!isGlobalDragging) {
-                            mainHandler.postDelayed(autoDismissRunnable, 4500)
+                            mainHandler.postDelayed(autoDismissRunnable, 4000)
                         }
                         true
                     }
@@ -1094,14 +959,10 @@ class UniversalDragService : AccessibilityService() {
 
             activeOverlayView = container
             windowManager.addView(container, params)
-            mainHandler.postDelayed(autoDismissRunnable, 5500)
+            mainHandler.postDelayed(autoDismissRunnable, 4500)
         }
     }
 
-    /**
-     * [v4.0 글로벌 드래그 세션]
-     * - ClipDescription에 실제 MIME 타입(image/png, video/mp4 등)을 명시적으로 세팅하여 모든 채팅앱이 미디어 드롭을 즉시 인식하도록 보장
-     */
     private fun startGlobalDragSession(
         hostView: View,
         hostParams: WindowManager.LayoutParams,
@@ -1125,7 +986,6 @@ class UniversalDragService : AccessibilityService() {
             val uri = payload.uri ?: return
             grantReadPermissionToAllApps(uri)
 
-            // 핵심: 타겟 앱의 OnDragListener / OnReceiveContentListener가 요구하는 구체적 MIME 배열 명시!
             val mimeArray = arrayOf(payload.mimeType, ClipDescription.MIMETYPE_TEXT_URILIST)
             val description = ClipDescription(payload.displayName, mimeArray)
             clipData = ClipData(description, ClipData.Item(uri))
@@ -1179,7 +1039,6 @@ class UniversalDragService : AccessibilityService() {
 
                 if (payload != null && !forceDropHandledByTracker) {
                     if (!event.result) {
-                        // 타겟 앱이 기본 드롭을 받지 않은 경우 -> 즉시 강제 드롭(Force-Drop) 실행
                         executeForceDrop(payload, dropX, dropY)
                     } else if (payload.type == PayloadType.TEXT) {
                         val txt = payload.text ?: ""
@@ -1262,10 +1121,10 @@ class UniversalDragService : AccessibilityService() {
         }
     }
 
-    /**
-     * [v4.0 미디어 & 텍스트 강제 드롭 엔진]
-     */
     private fun executeForceDrop(payload: DragPayload, dropX: Int, dropY: Int) {
+        val targetPkg = rootInActiveWindow?.packageName?.toString() ?: ""
+        if (isIgnoredPackage(targetPkg)) return
+
         showDropRipple(dropX, dropY)
 
         if (payload.type == PayloadType.TEXT) {
@@ -1287,9 +1146,6 @@ class UniversalDragService : AccessibilityService() {
             }
         } else {
             val uri = payload.uri ?: return
-            val targetPkg = rootInActiveWindow?.packageName?.toString()
-
-            // 1. 드롭 지점의 채팅창 입력 노드에 리치 클립보드 붙여넣기(ACTION_PASTE) 먼저 시도
             val editable = findEditableNodeNear(dropX, dropY) ?: findBestTargetEditable(dropX, dropY)
             if (payload.type == PayloadType.IMAGE && editable != null) {
                 editable.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
@@ -1297,8 +1153,6 @@ class UniversalDragService : AccessibilityService() {
                     return
                 }
             }
-
-            // 2. 드롭을 자체 지원하지 않는 채팅앱(카카오톡·X·디스코드 등)에 현재 열린 앱 패키지로 원본 미디어 직결 전송
             sendOriginalMediaToTargetApp(uri, payload.mimeType, targetPkg)
         }
     }

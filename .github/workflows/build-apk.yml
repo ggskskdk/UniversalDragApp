@@ -1,4 +1,4 @@
-name: Build UniversalDrag v4 APK
+name: Build UniversalDrag v5 APK
 on:
   push:
   workflow_dispatch:
@@ -17,10 +17,10 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
-      - name: Build Debug APK
+      - name: Build Debug APK (Signed with fixed universal_drag.p12)
         run: gradle assembleDebug
       - name: Upload Compiled APK
         uses: actions/upload-artifact@v4
         with:
-          name: UniversalDrag-v4-OriginalMedia-apk
+          name: UniversalDrag-v5-apk
           path: app/build/outputs/apk/debug/app-debug.apk

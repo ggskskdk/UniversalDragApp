@@ -35,15 +35,16 @@ class MainActivity : Activity() {
         }
 
         val title = TextView(this).apply {
-            text = "Universal Drag 4.0 (원본 무손실)"
+            text = "Universal Drag 5.0"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
         }
 
         val guide = TextView(this).apply {
-            text = "\n• [원본 비율 & 원본 해상도 100% 유지]: 고정 네모 캡처를 폐기하고, 원본 이미지/영상의 실제 해상도(예: 3024×4032)와 가로·세로 비율 그대로 드래그 섀도우가 생성됩니다.\n" +
-                   "• [시스템 MediaStore URI 직결]: 카카오톡·X·디스코드·메시지 등 모든 채팅창에 드롭 시 즉시 인식됩니다.\n" +
-                   "• [영상 드래그]: 영상을 길게 누르거나 캡슐 하단의 [🎬 최근 원본 영상(.mp4)으로 전환]을 누르면 원본 영상 파일 그대로 드래그됩니다.\n"
+            text = "\n✅ 수정 완료 내역:\n" +
+                   "1. 선택하지 않은 이전 캡처 이미지가 멋대로 뜨던 버그 완전 제거\n" +
+                   "2. 고정 서명키(universal_drag.p12) 및 자동 VersionCode 적용 완료 (향후 빌드 시 삭제 없이 바로 '업데이트' 설치 가능)\n" +
+                   "3. 홈 화면(바탕화면) 아이콘, 버튼, 상하단 바 롱프레스 시 팝업 완벽 차단\n"
             setTextColor(Color.parseColor("#A1A1AA"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
         }
