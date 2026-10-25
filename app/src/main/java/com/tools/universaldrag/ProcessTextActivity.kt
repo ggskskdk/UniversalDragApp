@@ -12,7 +12,11 @@ class ProcessTextActivity : Activity() {
         if (!text.isNullOrEmpty()) {
             val service = UniversalDragService.instance
             if (service != null) {
-                service.showSelectedTextPill(text)
+                service.showOrUpdateRealtimeTextPill(
+                    text,
+                    resources.displayMetrics.widthPixels / 2,
+                    resources.displayMetrics.heightPixels / 2
+                )
             } else {
                 Toast.makeText(this, "Universal Drag 접근성 권한을 먼저 켜주세요.", Toast.LENGTH_SHORT).show()
             }

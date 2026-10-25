@@ -27,8 +27,8 @@ class UniversalDragShadowBuilder(
             shadowW = (bw * scale).toInt().coerceAtLeast(minPreviewSide.toInt())
             shadowH = (bh * scale).toInt().coerceAtLeast(minPreviewSide.toInt())
         } else {
-            shadowW = (236 * density).toInt()
-            shadowH = (92 * density).toInt()
+            shadowW = (244 * density).toInt()
+            shadowH = (96 * density).toInt()
         }
     }
 
@@ -46,7 +46,7 @@ class UniversalDragShadowBuilder(
         style = Paint.Style.FILL
     }
     private val badgePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#E0E7FF")
+        color = Color.parseColor("#A5B4FC")
         textSize = 10.5f * density
         typeface = Typeface.DEFAULT_BOLD
     }
@@ -96,7 +96,7 @@ class UniversalDragShadowBuilder(
             canvas.drawRoundRect(rect, radius, radius, borderPaint)
 
             val textPad = 14f * density
-            canvas.drawText(titleBadge, textPad, textPad + 10f * density, badgePaint)
+            canvas.drawText(titleBadge, textPad, textPad + 11f * density, badgePaint)
 
             val clean = subtitleText.replace("\n", " ").trim()
             val line1 = if (clean.length > 22) clean.substring(0, 22) else clean
