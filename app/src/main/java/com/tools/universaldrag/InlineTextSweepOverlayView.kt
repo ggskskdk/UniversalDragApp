@@ -90,13 +90,15 @@ class InlineTextSweepOverlayView(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        val prevX = currentTouchX
+        val prevY = currentTouchY
         currentTouchX = event.rawX
         currentTouchY = event.rawY
 
         when (event.actionMasked) {
             MotionEvent.ACTION_MOVE -> {
-                val dx = abs(event.rawX - currentTouchX)
-                val dy = abs(event.rawY - currentTouchY)
+                val dx = abs(event.rawX - prevX)
+                val dy = abs(event.rawY - prevY)
 
                 // 위아래로 문지르는 중에는 영역 확장/축소
                 updateSelectionRange(event.rawY)

@@ -35,16 +35,16 @@ class MainActivity : Activity() {
         }
 
         val title = TextView(this).apply {
-            text = "Universal Drag 7.0"
+            text = "Universal Drag 8.0"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
         }
 
         val guide = TextView(this).apply {
-            text = "\n✅ v7.0 인라인 스위프:\n" +
-                   "1. [롱프레스]: 본문을 꾹 누르면 진동과 함께 원래 화면 글자 위에 파란 선택 영역이 뜹니다.\n" +
-                   "2. [화면 위 인라인 직접 드래그]: 다시 터치해 위아래로 문지르면 선택 범위가 바뀝니다.\n" +
-                   "3. [원스톱 드래그 앤 드롭]: 그대로 선택 영역 밖으로 끌고 나가면 다른 앱으로 드래그됩니다.\n"
+            text = "\n✅ v8.0 모든 앱 호환 업데이트:\n" +
+                   "1. [챗GPT / 클로드 / 브라우저 완벽 지원]: 텍스트를 드래그해 선택 메뉴(복사 | 모두 선택...)가 뜨면 그 바로 위에 [⠿ 선택 영역 바로 드래그] 캡슐이 자동으로 나타납니다.\n" +
+                   "2. [선택 핸들(●) 자유 조절]: 캡슐이 떠 있는 상태에서도 검정색 물방울 핸들(●)을 늘리거나 줄여 여러 문단을 자유롭게 선택할 수 있습니다.\n" +
+                   "3. [원터치 자동 복사 & 드래그]: 캡슐을 잡고 끄는 순간 툴바의 '복사'를 자동 실행하여 선택한 전체 문장을 끊김 없이 다른 앱으로 드래그합니다.\n"
             setTextColor(Color.parseColor("#A1A1AA"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
         }
