@@ -35,16 +35,16 @@ class MainActivity : Activity() {
         }
 
         val title = TextView(this).apply {
-            text = "Universal Drag 6.0"
+            text = "Universal Drag 7.0"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
         }
 
         val guide = TextView(this).apply {
-            text = "\n✅ v6.0 수정 완료:\n" +
-                   "1. [텍스트 플로팅바 v4.0 완전 복원]: 제미나이뿐만 아니라 챗GPT, 클로드, X(트위터) 등 모든 앱에서 텍스트를 꾹 누르면 영역 지정 플로팅바가 즉시 뜹니다.\n" +
-                   "2. [삼성 갤러리 원본 이미지·영상 매칭]: 갤러리 목록(썸네일 선택) 및 상세 보기에서 사진/영상을 꾹 누르면 방금 누른 원본 파일 그대로 드래그 캡슐이 뜹니다.\n" +
-                   "3. [업데이트 설치]: 기존 앱 삭제 없이 그대로 덮어쓰기 업데이트됩니다.\n"
+            text = "\n✅ v7.0 인라인 스위프:\n" +
+                   "1. [롱프레스]: 본문을 꾹 누르면 진동과 함께 원래 화면 글자 위에 파란 선택 영역이 뜹니다.\n" +
+                   "2. [화면 위 인라인 직접 드래그]: 다시 터치해 위아래로 문지르면 선택 범위가 바뀝니다.\n" +
+                   "3. [원스톱 드래그 앤 드롭]: 그대로 선택 영역 밖으로 끌고 나가면 다른 앱으로 드래그됩니다.\n"
             setTextColor(Color.parseColor("#A1A1AA"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
         }
@@ -57,7 +57,7 @@ class MainActivity : Activity() {
         }
 
         val btnStorage = Button(this).apply {
-            text = "2. 모든 파일(갤러리 원본 매칭) 권한 허용"
+            text = "2. 모든 파일(갤러리 원본) 권한 허용"
             setOnClickListener {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
                     val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {

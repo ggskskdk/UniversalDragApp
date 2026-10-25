@@ -24,12 +24,8 @@ class ShareReceiveActivity : Activity() {
                 @Suppress("DEPRECATION")
                 intent.getParcelableExtra(Intent.EXTRA_STREAM)
             }
-            val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
-
             if (streamUri != null) {
                 service.handleSharedUri(streamUri, intent.type)
-            } else if (!sharedText.isNullOrBlank()) {
-                service.showTextSelectionAndDragOverlay(sharedText)
             }
         }
         finish()
