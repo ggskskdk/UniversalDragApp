@@ -30,6 +30,8 @@ class UniversalDragService : AccessibilityService() {
 
     companion object {
         var instance: UniversalDragService? = null
+        const val PROCESS_TEXT_LABEL = "드래그 앤 드롭"
+        private val overflowLabels = setOf("옵션 더보기", "더보기", "More options", "추가 옵션")
     }
 
     enum class PayloadType { TEXT, IMAGE, VIDEO, FILE }
@@ -63,7 +65,9 @@ class UniversalDragService : AccessibilityService() {
     private var activeOverlayView: View? = null
     private var activeOverlayParams: WindowManager.LayoutParams? = null
     private var isShowingToolbarCapsule = false
-    private var isPreparingToolbarCopyDrag = false
+    private var isFetchingSelection = false
+    private var lastToolbarRect: Rect? = null
+    private var lastToolbarSeenAt = 0L
 
     private var dragTrackerView: View? = null
     private var trackerParams: WindowManager.LayoutParams? = null
@@ -118,22 +122,6 @@ class UniversalDragService : AccessibilityService() {
         scanAndSyncFloatingSelectionToolbar()
     }
 
-    private val clipListener = ClipboardManager.OnPrimaryClipChangedListener {
-        if (internalClipChange) {
-            internalClipChange = false
-            return@OnPrimaryClipChangedListener
-        }
-        val clip = clipboardManager.primaryClip ?: return@OnPrimaryClipChangedListener
-        if (clip.itemCount > 0) {
-            val item = clip.getItemAt(0)
-            val clipUri = item.uri
-            if (clipUri != null) {
-                val mime = contentResolver.getType(clipUri) ?: clip.description.getMimeType(0) ?: "image/*"
-                handleSharedUri(clipUri, mime)
-            }
-        }
-    }
-
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
@@ -147,7 +135,6 @@ class UniversalDragService : AccessibilityService() {
             getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         }
 
-        clipboardManager.addPrimaryClipChangedListener(clipListener)
         refreshLauncherPackages()
         cleanupOldTempMediaStoreEntries()
         setupDragLocationTracker()
@@ -192,7 +179,7 @@ class UniversalDragService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || isGlobalDragging || isPreparingToolbarCopyDrag) return
+        if (event == null || isGlobalDragging || isFetchingSelection) return
         val pkgName = event.packageName?.toString() ?: ""
         if (pkgName == packageName) return
 
@@ -231,34 +218,12 @@ class UniversalDragService : AccessibilityService() {
                 }
             }
 
-            // 3. [v8.0 핵심] 챗GPT/클로드 메시지 하단 [복사] 아이콘 또는 툴바의 [복사] 버튼을 직접 눌렀을 때도 즉시 드래그 캡슐 팝업
-            AccessibilityEvent.TYPE_VIEW_CLICKED -> {
-                val source = event.source ?: return
-                val label = (source.text?.toString() ?: source.contentDescription?.toString() ?: "").trim()
-                val viewId = source.viewIdResourceName ?: ""
-                if (copyLabels.contains(label) || label.contains("복사") || viewId.contains("copy", ignoreCase = true)) {
-                    val rect = Rect()
-                    source.getBoundsInScreen(rect)
-                    val cx = if (rect.width() > 0) rect.centerX() else resources.displayMetrics.widthPixels / 2
-                    val cy = if (rect.height() > 0) rect.top else resources.displayMetrics.heightPixels / 2
-                    readClipboardWithTempFocus(delayMs = 65L) { copiedText ->
-                        if (!copiedText.isNullOrBlank()) {
-                            isShowingToolbarCapsule = false
-                            showQuickDragPill(
-                                DragPayload(PayloadType.TEXT, text = copiedText, displayName = copiedText),
-                                cx,
-                                cy
-                            )
-                        }
-                    }
-                }
-            }
-
             // 4. 갤러리 및 일반 앱 롱프레스 지원
             AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> {
                 if (isHomeLauncher(pkgName)) return
                 if (now - lastEventTimestamp < 350) return
                 val source = event.source ?: rootInActiveWindow ?: return
+                if (source.isEditable) return
                 lastEventTimestamp = now
                 if (isGalleryApp(pkgName)) {
                     handleGalleryNodeSelection(source)
@@ -281,14 +246,6 @@ class UniversalDragService : AccessibilityService() {
                 }
             }
 
-            // 5. 삼성 갤러리 썸네일 선택 지원
-            AccessibilityEvent.TYPE_VIEW_SELECTED -> {
-                if (!isGalleryApp(pkgName)) return
-                if (now - lastEventTimestamp < 350) return
-                val source = event.source ?: return
-                lastEventTimestamp = now
-                handleGalleryNodeSelection(source)
-            }
         }
     }
 
@@ -311,7 +268,7 @@ class UniversalDragService : AccessibilityService() {
      * 그 바로 위에 드래그 캡슐을 띄워 핸들(●) 조절을 방해하지 않으면서도 잡는 즉시 드래그되게 함.
      */
     private fun scanAndSyncFloatingSelectionToolbar() {
-        if (isGlobalDragging || isPreparingToolbarCopyDrag) return
+        if (isGlobalDragging || isFetchingSelection) return
         val toolbar = findFloatingSelectionToolbar()
         if (toolbar != null) {
             showOrUpdateToolbarSelectionCapsule(toolbar)
@@ -322,16 +279,20 @@ class UniversalDragService : AccessibilityService() {
     }
 
     private fun findFloatingSelectionToolbar(): SelectionToolbarInfo? {
-        val allRoots = mutableListOf<AccessibilityNodeInfo>()
+        // ponytail: the selection toolbar is its own small popup window; full-size app windows (ChatGPT/Claude
+        // message action rows with Copy|Share) and the keyboard are skipped so they can't fake a toolbar
+        val screenH = resources.displayMetrics.heightPixels
+        val toolbarRoots = mutableListOf<AccessibilityNodeInfo>()
         runCatching {
             for (w in windows) {
-                w.root?.let { allRoots.add(it) }
+                if (w.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+                val root = w.root ?: continue
+                val b = Rect()
+                w.getBoundsInScreen(b)
+                if (b.height() in 1..(screenH * 0.4f).toInt()) toolbarRoots.add(root)
             }
         }
-        rootInActiveWindow?.let { root ->
-            if (allRoots.none { it == root }) allRoots.add(root)
-        }
-        if (allRoots.isEmpty()) return null
+        if (toolbarRoots.isEmpty()) return null
 
         var copyRaw: AccessibilityNodeInfo? = null
         var copyClickable: AccessibilityNodeInfo? = null
@@ -383,7 +344,7 @@ class UniversalDragService : AccessibilityService() {
             }
         }
 
-        for (root in allRoots) {
+        for (root in toolbarRoots) {
             inspectTree(root)
         }
 
@@ -444,6 +405,8 @@ class UniversalDragService : AccessibilityService() {
             (toolbar.toolbarRect.bottom + dp(68f)).coerceAtMost(screenH - dp(140f))
         }
 
+        lastToolbarRect = Rect(toolbar.toolbarRect)
+        lastToolbarSeenAt = System.currentTimeMillis()
         val payload = DragPayload(
             type = PayloadType.TEXT,
             text = toolbar.preExtractedText,
@@ -470,122 +433,118 @@ class UniversalDragService : AccessibilityService() {
     }
 
     /**
-     * [v8.0 핵심]
-     * 안드로이드 10~15의 백그라운드 클립보드 읽기 차단을 우회하기 위해
-     * 오버레이에 약 30ms 동안만 포커스를 부여해 클립보드 텍스트를 읽어낸 뒤 즉시 원래 플래그로 복원함.
+     * 선택 툴바에서 실제로 선택된 텍스트를 가져옴.
+     * 1순위: 툴바의 [드래그 앤 드롭](이 앱의 PROCESS_TEXT 항목)을 눌러 안드로이드가 넘겨주는 정확한 선택 텍스트 사용
+     * 2순위: [복사]를 누른 뒤, 방금 복사된 클립보드일 때만 사용 (예전 클립보드 내용은 절대 띄우지 않음)
      */
-    private fun readClipboardWithTempFocus(delayMs: Long = 45L, onResult: (String?) -> Unit) {
-        mainHandler.postDelayed({
-            val tempView = View(this)
-            val lp = WindowManager.LayoutParams(
-                1, 1,
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                PixelFormat.TRANSLUCENT
-            ).apply {
-                gravity = Gravity.TOP or Gravity.START
-                x = 0
-                y = 0
-            }
+    private fun fetchSelectedTextFromToolbar() {
+        if (isFetchingSelection) return
+        isFetchingSelection = true
+        mainHandler.postDelayed({ isFetchingSelection = false }, 1500)
 
-            runCatching {
-                windowManager.addView(tempView, lp)
-                tempView.requestFocus()
-            }
-
+        if (clickToolbarItem(PROCESS_TEXT_LABEL)) return
+        // our item may sit in the toolbar overflow menu
+        val overflow = findToolbarNode { label, _ -> label in overflowLabels }
+        if (overflow != null) {
+            findClickableSelfOrParent(overflow)?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
             mainHandler.postDelayed({
-                var text: String? = null
-                runCatching {
-                    val clip = clipboardManager.primaryClip
-                    if (clip != null && clip.itemCount > 0) {
-                        text = clip.getItemAt(0).coerceToText(this)?.toString()?.trim()
-                    }
+                if (!clickToolbarItem(PROCESS_TEXT_LABEL)) copyAndReadFreshClip()
+            }, 300)
+            return
+        }
+        copyAndReadFreshClip()
+    }
+
+    private fun clickToolbarItem(label: String): Boolean {
+        val node = findToolbarNode { l, _ -> l == label } ?: return false
+        return findClickableSelfOrParent(node)?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+    }
+
+    private fun findToolbarNode(match: (String, AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
+        val screenH = resources.displayMetrics.heightPixels
+        var found: AccessibilityNodeInfo? = null
+        fun walk(n: AccessibilityNodeInfo?) {
+            if (n == null || found != null) return
+            val label = (n.text?.toString() ?: n.contentDescription?.toString() ?: "").trim()
+            if (label.isNotEmpty() && match(label, n)) { found = n; return }
+            for (i in 0 until n.childCount) walk(n.getChild(i))
+        }
+        runCatching {
+            for (w in windows) {
+                if (w.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+                val b = Rect()
+                w.getBoundsInScreen(b)
+                if (b.height() in 1..(screenH * 0.4f).toInt()) walk(w.root)
+                if (found != null) break
+            }
+        }
+        return found
+    }
+
+    private fun copyAndReadFreshClip() {
+        val toolbar = findFloatingSelectionToolbar()
+        if (toolbar == null) {
+            toast("선택한 텍스트를 가져오지 못했어요")
+            return
+        }
+        val clickedAt = System.currentTimeMillis()
+        if (!toolbar.copyClickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            toolbar.copyRawNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
+        mainHandler.postDelayed({
+            readClipWithTempFocus { clip ->
+                // ponytail: ClipDescription.timestamp (currentTimeMillis) proves the clip is the copy we just made
+                val fresh = clip != null && clip.itemCount > 0 && clip.description.timestamp >= clickedAt - 200
+                val text = if (fresh) clip!!.getItemAt(0).coerceToText(this)?.toString()?.trim() else null
+                if (text.isNullOrBlank()) {
+                    toast("선택한 텍스트를 가져오지 못했어요")
+                } else {
+                    showSelectedTextPill(text)
                 }
-                runCatching { windowManager.removeView(tempView) }
-                onResult(text)
-            }, 35L)
-        }, delayMs)
+            }
+        }, 250)
     }
 
     /**
-     * 사용자가 [⠿ 선택 텍스트 드래그] 캡슐을 잡고 끄는 순간:
-     * 1) 화면에 떠 있는 플로팅 툴바의 "복사" 버튼을 자동으로 클릭(performAction)하여
-     *    챗GPT/클로드의 다중 문단 선택 영역 전체를 클립보드에 복사시키고,
-     * 2) 오버레이에 순간 포커스를 부여해 복사된 텍스트를 읽어온 뒤
-     * 3) 손을 떼지 않은 상태 그대로 글로벌 드래그(startDragAndDrop)를 즉시 발동함!
+     * 안드로이드 10+ 백그라운드 클립보드 읽기 제한 때문에, 1x1 오버레이에 아주 잠깐 포커스를 준 뒤 읽고 즉시 제거함.
      */
-    private fun triggerToolbarCopyAndStartGlobalDrag(overlayContainer: View) {
-        if (isGlobalDragging || isPreparingToolbarCopyDrag) return
-        isPreparingToolbarCopyDrag = true
+    private fun readClipWithTempFocus(onResult: (ClipData?) -> Unit) {
+        val tempView = View(this)
+        val lp = WindowManager.LayoutParams(
+            1, 1,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.START }
 
-        // 1단계: 현재 화면의 플로팅 툴바 "복사" 버튼 즉시 클릭
-        val liveToolbar = findFloatingSelectionToolbar()
-        var copyClicked = false
-        if (liveToolbar != null) {
-            copyClicked = liveToolbar.copyClickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            if (!copyClicked) {
-                copyClicked = liveToolbar.copyRawNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            }
-            if (!copyClicked) {
-                copyClicked = liveToolbar.copyRawNode.parent?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
-            }
-        }
-
-        // 2단계: 25ms 후 오버레이 윈도우에 포커스를 활성화하여 안드로이드 10~15 클립보드 읽기 권한 획득
+        val added = runCatching { windowManager.addView(tempView, lp); tempView.requestFocus() }.isSuccess
         mainHandler.postDelayed({
-            val lp = activeOverlayParams
-            if (lp != null && activeOverlayView == overlayContainer) {
-                lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
-                runCatching {
-                    windowManager.updateViewLayout(overlayContainer, lp)
-                    overlayContainer.requestFocus()
-                }
-            }
+            val clip = runCatching { clipboardManager.primaryClip }.getOrNull()
+            if (added) runCatching { windowManager.removeView(tempView) }
+            onResult(clip)
+        }, 60L)
+    }
 
-            // 3단계: 클립보드에서 방금 복사된 챗GPT/클로드/브라우저 텍스트 읽기 및 글로벌 드래그 시작
-            mainHandler.postDelayed({
-                var copiedText: String? = null
-                runCatching {
-                    val clip = clipboardManager.primaryClip
-                    if (clip != null && clip.itemCount > 0) {
-                        copiedText = clip.getItemAt(0).coerceToText(this)?.toString()?.trim()
-                    }
-                }
+    /** 실제로 선택된 텍스트로 드래그 캡슐을 띄움 (툴바가 최근에 보였으면 그 위치에) */
+    fun showSelectedTextPill(text: String) {
+        val r = lastToolbarRect?.takeIf { System.currentTimeMillis() - lastToolbarSeenAt < 10_000 }
+        val x = r?.centerX() ?: (resources.displayMetrics.widthPixels / 2)
+        val y = r?.top ?: (resources.displayMetrics.heightPixels / 2)
+        isFetchingSelection = false
+        showQuickDragPill(DragPayload(PayloadType.TEXT, text = text, displayName = text), x, y)
+    }
 
-                // 플래그 원복
-                if (lp != null && activeOverlayView == overlayContainer) {
-                    lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                    runCatching { windowManager.updateViewLayout(overlayContainer, lp) }
-                }
-
-                isPreparingToolbarCopyDrag = false
-                val finalText = if (!copiedText.isNullOrBlank()) {
-                    copiedText!!
-                } else {
-                    currentPayload?.text ?: ""
-                }
-
-                if (finalText.isNotBlank()) {
-                    triggerHapticFeedback()
-                    startGlobalDragDirectly(
-                        DragPayload(
-                            type = PayloadType.TEXT,
-                            text = finalText,
-                            displayName = finalText,
-                            requiresToolbarCopyOnDrag = false
-                        )
-                    )
-                }
-            }, 35L)
-        }, 25L)
+    private fun toast(msg: String) = mainHandler.post {
+        isFetchingSelection = false
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
     }
 
     override fun onInterrupt() {}
 
     override fun onDestroy() {
         instance = null
-        clipboardManager.removePrimaryClipChangedListener(clipListener)
         removeActiveOverlay()
         dragTrackerView?.let { runCatching { windowManager.removeView(it) } }
         super.onDestroy()
@@ -770,22 +729,8 @@ class UniversalDragService : AccessibilityService() {
                     val matchedPayload = resolveExactGalleryMedia(desc, targetCrop, isGridThumb)
                     if (matchedPayload != null) {
                         mainHandler.post { showQuickDragPill(matchedPayload, cx, cy) }
-                    } else if (targetCrop != null) {
-                        val bmp = targetCrop!!
-                        val fileName = "GalleryDrag_${System.currentTimeMillis()}.png"
-                        val uri = insertBitmapIntoMediaStore(bmp, fileName, "image/png")
-                        if (uri != null) {
-                            val fallback = DragPayload(
-                                type = PayloadType.IMAGE,
-                                uri = uri,
-                                mimeType = "image/png",
-                                displayName = fileName,
-                                origWidth = bmp.width,
-                                origHeight = bmp.height,
-                                previewBitmap = createAspectRatioPreview(bmp, 480)
-                            )
-                            mainHandler.post { showQuickDragPill(fallback, cx, cy) }
-                        }
+                    } else {
+                        toast("원본을 확실히 찾지 못했어요. 공유 → ⚡ 원본 드래그를 써주세요")
                     }
                 }
             }
@@ -795,6 +740,8 @@ class UniversalDragService : AccessibilityService() {
                     val matchedPayload = resolveExactGalleryMedia(desc, null, isGridThumb)
                     if (matchedPayload != null) {
                         mainHandler.post { showQuickDragPill(matchedPayload, cx, cy) }
+                    } else {
+                        toast("원본을 확실히 찾지 못했어요. 공유 → ⚡ 원본 드래그를 써주세요")
                     }
                 }
             }
@@ -917,6 +864,7 @@ class UniversalDragService : AccessibilityService() {
             val targetSig = computeCenterVisualSignature(screenCrop, isGridSquareThumb)
             var bestCandidate: MediaCandidate? = null
             var bestDist = Long.MAX_VALUE
+            var secondDist = Long.MAX_VALUE
 
             for (cand in pool) {
                 runCatching {
@@ -924,21 +872,22 @@ class UniversalDragService : AccessibilityService() {
                     val candSig = computeCenterVisualSignature(thumb, isGridSquareThumb)
                     val dist = signatureDistance(targetSig, candSig)
                     if (dist < bestDist) {
+                        secondDist = bestDist
                         bestDist = dist
                         bestCandidate = cand
+                    } else if (dist < secondDist) {
+                        secondDist = dist
                     }
                 }
             }
 
-            if (bestCandidate != null) {
+            // ponytail: calibration knobs - avg per-pixel RGB diff <= 45 and clearly better than the runner-up;
+            // anything less certain shows nothing instead of a wrong photo
+            val confident = bestDist <= 144L * 45 && (secondDist == Long.MAX_VALUE || bestDist * 10 < secondDist * 7)
+            if (bestCandidate != null && confident) {
                 val c = bestCandidate!!
                 return candidateToPayload(c.uri, c.name, c.mime, c.width, c.height, c.isVideo)
             }
-        }
-
-        if (dateCandidates.isNotEmpty()) {
-            val c = dateCandidates.first()
-            return candidateToPayload(c.uri, c.name, c.mime, c.width, c.height, c.isVideo)
         }
         return null
     }
@@ -1091,7 +1040,7 @@ class UniversalDragService : AccessibilityService() {
             }
 
             val typeTitle = when (payload.type) {
-                PayloadType.TEXT -> if (payload.requiresToolbarCopyOnDrag) "⠿ 선택 영역 바로 드래그" else "⠿ 텍스트 드래그"
+                PayloadType.TEXT -> if (payload.requiresToolbarCopyOnDrag) "⠿ 선택한 텍스트 가져오기" else "⠿ 텍스트 드래그"
                 PayloadType.IMAGE -> "🖼️ 이미지 ($resInfo)"
                 PayloadType.VIDEO -> "🎬 영상 ($resInfo)"
                 PayloadType.FILE -> "📁 ${payload.displayName}"
@@ -1112,7 +1061,7 @@ class UniversalDragService : AccessibilityService() {
             val subTv = TextView(this).apply {
                 text = if (payload.type == PayloadType.TEXT) {
                     if (payload.requiresToolbarCopyOnDrag) {
-                        "이 캡슐을 잡고 끌면 선택 문장이 바로 이동됩니다"
+                        "탭하면 선택한 문장이 여기에 표시됩니다"
                     } else {
                         payload.displayName.replace("\n", " ").take(24)
                     }
@@ -1170,20 +1119,15 @@ class UniversalDragService : AccessibilityService() {
                         lastDropY = ev.rawY
                         mainHandler.removeCallbacks(autoDismissRunnable)
 
-                        // 챗GPT/클로드/브라우저 툴바 연동 모드일 경우 터치 즉시 자동 복사+글로벌 드래그 시퀀스 가동
-                        val activePayload = currentPayload ?: payload
-                        if (activePayload.requiresToolbarCopyOnDrag && activePayload.text.isNullOrBlank()) {
-                            triggerToolbarCopyAndStartGlobalDrag(container)
-                        }
                         true
                     }
                     MotionEvent.ACTION_MOVE -> {
                         val activePayload = currentPayload ?: payload
-                        if (!isGlobalDragging && !isPreparingToolbarCopyDrag &&
+                        if (!isGlobalDragging && !isFetchingSelection &&
                             hypot((ev.rawX - startX).toDouble(), (ev.rawY - startY).toDouble()) > dp(5f)
                         ) {
                             if (activePayload.requiresToolbarCopyOnDrag && activePayload.text.isNullOrBlank()) {
-                                triggerToolbarCopyAndStartGlobalDrag(container)
+                                fetchSelectedTextFromToolbar()
                             } else {
                                 startGlobalDragDirectly(activePayload)
                             }
@@ -1191,7 +1135,12 @@ class UniversalDragService : AccessibilityService() {
                         true
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        if (!isGlobalDragging && !isPreparingToolbarCopyDrag) {
+                        val activePayload = currentPayload ?: payload
+                        if (ev.actionMasked == MotionEvent.ACTION_UP && activePayload.requiresToolbarCopyOnDrag &&
+                            activePayload.text.isNullOrBlank()
+                        ) {
+                            fetchSelectedTextFromToolbar()
+                        } else if (!isGlobalDragging && !isFetchingSelection) {
                             mainHandler.postDelayed(autoDismissRunnable, 5500)
                         }
                         true
@@ -1508,7 +1457,7 @@ class UniversalDragService : AccessibilityService() {
     private fun removeActiveOverlay() {
         mainHandler.removeCallbacks(autoDismissRunnable)
         isShowingToolbarCapsule = false
-        isPreparingToolbarCopyDrag = false
+        isFetchingSelection = false
         activeOverlayView?.let {
             runCatching { windowManager.removeView(it) }
         }

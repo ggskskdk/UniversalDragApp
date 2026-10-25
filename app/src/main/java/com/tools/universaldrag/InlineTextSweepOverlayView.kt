@@ -96,6 +96,15 @@ class InlineTextSweepOverlayView(
         currentTouchY = event.rawY
 
         when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                val b = getSelectedBounds()
+                b.inset(-dp(48f), -dp(48f))
+                if (!b.contains(event.rawX.toInt(), event.rawY.toInt())) {
+                    isDraggingSession = true
+                    onDismiss()
+                }
+                return true
+            }
             MotionEvent.ACTION_MOVE -> {
                 val dx = abs(event.rawX - prevX)
                 val dy = abs(event.rawY - prevY)
