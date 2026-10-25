@@ -7,7 +7,6 @@ android {
     namespace = "com.tools.universaldrag"
     compileSdk = 35
 
-    // 빌드할 때마다 versionCode가 자동 증가하여 기존 앱 삭제 없이 무조건 '업데이트' 설치됨
     val autoVersionCode = (System.currentTimeMillis() / 1000L).toInt()
 
     defaultConfig {
@@ -15,7 +14,7 @@ android {
         minSdk = 30
         targetSdk = 35
         versionCode = autoVersionCode
-        versionName = "5.0.$autoVersionCode"
+        versionName = "6.0.$autoVersionCode"
     }
 
     signingConfigs {

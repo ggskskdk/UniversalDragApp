@@ -35,29 +35,29 @@ class MainActivity : Activity() {
         }
 
         val title = TextView(this).apply {
-            text = "Universal Drag 5.0"
+            text = "Universal Drag 6.0"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
         }
 
         val guide = TextView(this).apply {
-            text = "\n✅ 수정 완료 내역:\n" +
-                   "1. 선택하지 않은 이전 캡처 이미지가 멋대로 뜨던 버그 완전 제거\n" +
-                   "2. 고정 서명키(universal_drag.p12) 및 자동 VersionCode 적용 완료 (향후 빌드 시 삭제 없이 바로 '업데이트' 설치 가능)\n" +
-                   "3. 홈 화면(바탕화면) 아이콘, 버튼, 상하단 바 롱프레스 시 팝업 완벽 차단\n"
+            text = "\n✅ v6.0 수정 완료:\n" +
+                   "1. [텍스트 플로팅바 v4.0 완전 복원]: 제미나이뿐만 아니라 챗GPT, 클로드, X(트위터) 등 모든 앱에서 텍스트를 꾹 누르면 영역 지정 플로팅바가 즉시 뜹니다.\n" +
+                   "2. [삼성 갤러리 원본 이미지·영상 매칭]: 갤러리 목록(썸네일 선택) 및 상세 보기에서 사진/영상을 꾹 누르면 방금 누른 원본 파일 그대로 드래그 캡슐이 뜹니다.\n" +
+                   "3. [업데이트 설치]: 기존 앱 삭제 없이 그대로 덮어쓰기 업데이트됩니다.\n"
             setTextColor(Color.parseColor("#A1A1AA"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
         }
 
         val btnAcc = Button(this).apply {
-            text = "1. 접근성 권한 설정 열기 (필수)"
+            text = "1. 접근성 권한 설정 열기"
             setOnClickListener {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             }
         }
 
         val btnStorage = Button(this).apply {
-            text = "2. 모든 파일(원본 영상/이미지) 접근 권한 허용"
+            text = "2. 모든 파일(갤러리 원본 매칭) 권한 허용"
             setOnClickListener {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
                     val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {

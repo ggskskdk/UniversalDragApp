@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
@@ -38,7 +39,6 @@
             </intent-filter>
         </activity>
 
-        <!-- 이미지/영상/파일을 길게 눌러 [공유 -> ⚡ 원본 드래그] 선택 시 원본 해상도 그대로 드래그 -->
         <activity
             android:name=".ShareReceiveActivity"
             android:exported="true"
