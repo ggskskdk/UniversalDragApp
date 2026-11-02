@@ -35,16 +35,16 @@ class MainActivity : Activity() {
         }
 
         val title = TextView(this).apply {
-            text = "Universal Drag 10.0"
+            text = "Universal Drag 11.0"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
         }
 
         val guide = TextView(this).apply {
-            text = "\n✅ v10.0 다중 선택 & 드래그 고도화:\n" +
-                   "1. [내 파일 & 갤러리 다중 체크 동기화]: 여러 개의 파일(ZIP, APK 등)이나 사진/영상을 추가로 체크하거나 해제할 때 실시간으로 개수가 갱신됩니다.\n" +
-                   "2. [스크롤 누적 세션 캐시]: 선택 모드에서 스크롤하며 체크한 모든 항목을 잃어버리지 않고 한 번에 묶어 드래그합니다.\n" +
-                   "3. [멀티 스택 섀도우 & 다중 전송]: 겹쳐진 카드 스택과 개수 배지를 표시하며, 모든 원본 파일을 타겟 앱에 일괄 드롭합니다.\n"
+            text = "\n✅ v11.0 갤러리 컨텍스트 메뉴 & 썸네일 대응:\n" +
+                   "1. [갤러리 흰색 팝업 메뉴 감지]: 사진을 꾹 눌러 '만들기/공유/삭제/클립보드에 복사' 메뉴가 뜰 때도 뒤쪽 갤러리 창을 함께 스캔해 검은색 드래그 팝업을 띄웁니다.\n" +
+                   "2. [하단 필름스트립 & 큰 사진 뷰 지원]: 화면 맨 아래쪽 썸네일과 큰 사진 보기 화면에서도 동작합니다.\n" +
+                   "3. [빠른 팝업]: 날짜로 원본이 확정되면 스크린샷 없이 바로 띄우고, 애매한 사진만 화면과 비교해 확실할 때만 띄웁니다.\n"
             setTextColor(Color.parseColor("#A1A1AA"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
         }

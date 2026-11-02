@@ -100,6 +100,10 @@ class UniversalDragService : AccessibilityService() {
     private val selectedGallerySessionMap = LinkedHashMap<String, ResolvedEntry>()
     private val visibleCheckedGalleryKeys = mutableSetOf<String>()
 
+    private var wasGalleryContextMenuVisible = false
+    private var lastGalleryInteractedRect = Rect()
+    private var lastGalleryInteractedDesc = ""
+
     private val isVisualSliceRunning = AtomicBoolean(false)
     private var lastVisualSliceTimestamp: Long = 0L
 
@@ -179,6 +183,28 @@ class UniversalDragService : AccessibilityService() {
                lower.contains("filemanager")
     }
 
+    /**
+     * [v11.0] 분할 화면이나 팝업 메뉴가 뜬 상태에서도 해당 앱의 모든 윈도우 루트를 빠짐없이 수집
+     */
+    private fun collectAppRoots(predicate: (String) -> Boolean): List<AccessibilityNodeInfo> {
+        val roots = mutableListOf<AccessibilityNodeInfo>()
+        runCatching {
+            for (w in windows) {
+                val r = w.root ?: continue
+                if (predicate(r.packageName?.toString() ?: "")) roots.add(r)
+            }
+        }
+        val active = rootInActiveWindow
+        if (active != null && predicate(active.packageName?.toString() ?: "") && roots.none { it == active }) {
+            roots.add(active)
+        }
+        return roots
+    }
+
+    private fun toast(msg: String) = mainHandler.post {
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    }
+
     private fun scheduleScan(block: () -> Unit) {
         pendingScan?.let { mainHandler.removeCallbacks(it) }
         val r = Runnable { block() }
@@ -199,6 +225,7 @@ class UniversalDragService : AccessibilityService() {
                     event.source?.getBoundsInScreen(srcRect)
                     mainHandler.postDelayed({ syncMyFilesMultiSelection(srcRect, true) }, 65L)
                 }
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
                 AccessibilityEvent.TYPE_VIEW_CLICKED,
                 AccessibilityEvent.TYPE_VIEW_SELECTED -> {
@@ -212,14 +239,19 @@ class UniversalDragService : AccessibilityService() {
         if (isGalleryApp(pkgName)) {
             when (event.eventType) {
                 AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> {
-                    val srcRect = Rect()
-                    event.source?.getBoundsInScreen(srcRect)
-                    mainHandler.postDelayed({ syncGalleryMultiSelection(srcRect, true) }, 75L)
+                    rememberGalleryInteraction(event.source)
+                    val srcRect = Rect(lastGalleryInteractedRect)
+                    mainHandler.postDelayed({ syncGalleryMultiSelection(srcRect, true) }, 45L)
                 }
+                AccessibilityEvent.TYPE_VIEW_CLICKED -> {
+                    rememberGalleryInteraction(event.source)
+                    scheduleScan { syncGalleryMultiSelection(Rect(lastGalleryInteractedRect), false) }
+                }
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
-                AccessibilityEvent.TYPE_VIEW_CLICKED,
-                AccessibilityEvent.TYPE_VIEW_SELECTED -> {
-                    scheduleScan { syncGalleryMultiSelection(Rect(), false) }
+                AccessibilityEvent.TYPE_VIEW_SELECTED,
+                AccessibilityEvent.TYPE_VIEW_FOCUSED -> {
+                    scheduleScan { syncGalleryMultiSelection(Rect(lastGalleryInteractedRect), false) }
                 }
             }
             return
@@ -259,6 +291,24 @@ class UniversalDragService : AccessibilityService() {
         }
     }
 
+    // ponytail: only long-press/tap sources are remembered; content-change sources are whole grids and would
+    // point the "closest cell" lookup at the middle of the screen
+    private fun rememberGalleryInteraction(src: AccessibilityNodeInfo?) {
+        if (src == null) return
+        val r = Rect()
+        src.getBoundsInScreen(r)
+        if (r.width() < dp(32f) || r.height() < dp(32f)) return
+        lastGalleryInteractedRect.set(r)
+        val d = buildString {
+            src.contentDescription?.let { append(it).append(" ") }
+            src.text?.let { append(it).append(" ") }
+            src.stateDescription?.let { append(it) }
+        }.trim()
+        if (d.isNotEmpty() && !d.contains("복사") && !d.contains("삭제") && !d.contains("공유")) {
+            lastGalleryInteractedDesc = d
+        }
+    }
+
     override fun onInterrupt() {
         removeActiveOverlay()
         removeDragTracker()
@@ -282,7 +332,8 @@ class UniversalDragService : AccessibilityService() {
      * - 모든 체크가 해제되면 팝업 자동 닫힘
      */
     private fun syncMyFilesMultiSelection(initialRect: Rect, isExplicitLongPress: Boolean) {
-        val root = rootInActiveWindow ?: return
+        val roots = collectAppRoots(::isMyFilesApp)
+        if (roots.isEmpty()) return
         val screenH = resources.displayMetrics.heightPixels
 
         data class VisibleFileRow(
@@ -304,15 +355,15 @@ class UniversalDragService : AccessibilityService() {
 
             val hr = Rect()
             node.getBoundsInScreen(hr)
-            if (hr.bottom < dp(190f)) {
+            if (hr.bottom < dp(220f)) {
                 val match = headerCountRegex.find(nodeText) ?: headerCountRegex.find(nodeDesc)
                 if (match != null) {
                     headerSelectedCount = match.groupValues[1].toIntOrNull()
                 }
             }
 
-            val isRowBounds = hr.width() > dp(200f) && hr.height() in dp(44f)..dp(165f) &&
-                              hr.top in dp(80f)..(screenH - dp(80f))
+            val isRowBounds = hr.width() > dp(180f) && hr.height() in dp(40f)..dp(170f) &&
+                              hr.top in dp(45f)..(screenH - dp(20f))
 
             if (isRowBounds && node.childCount >= 1) {
                 var rowChecked = node.isChecked || node.isSelected ||
@@ -363,7 +414,7 @@ class UniversalDragService : AccessibilityService() {
             }
         }
 
-        scanMyFiles(root, 0)
+        for (r in roots) scanMyFiles(r, 0)
 
         val distinctVisible = visibleRows.distinctBy { it.fileName }
         val currentlyCheckedVisible = distinctVisible.filter { it.isChecked }
@@ -440,12 +491,16 @@ class UniversalDragService : AccessibilityService() {
     }
 
     /**
-     * [삼성 갤러리 다중 선택 실시간 동기화 엔진]
-     * - 썸네일 1개 꾹 누르기 + 추가 썸네일 연속 체크/해제 시 실시간으로 모든 원본 사진·영상 Uri를 매칭
-     * - 체크 개수 변경 시 깜빡임 없이 팝업 내용·개수 배지·스택 썸네일 즉시 업데이트
+     * [v11.0 삼성 갤러리 다중 선택 / 컨텍스트 메뉴 동기화]
+     * - 갤러리의 모든 창(흰색 컨텍스트 메뉴 + 본 화면 + 분할 화면)을 함께 스캔
+     * - 컨텍스트 메뉴(클립보드에 복사 / 앨범으로 복사 / 앨범으로 이동)가 뜨면 꾹 누른 선택으로 판정
+     * - 하단 필름스트립 썸네일과 큰 사진 화면도 감지
+     * - 날짜로 원본이 하나로 확정되면 스크린샷 없이 즉시 표시하고, 나머지만 스크린샷 시각 매칭(확신할 때만)
      */
     private fun syncGalleryMultiSelection(initialLongPressRect: Rect, isExplicitLongPress: Boolean) {
-        val root = rootInActiveWindow ?: return
+        val galleryRoots = collectAppRoots(::isGalleryApp)
+        if (galleryRoots.isEmpty()) return
+
         val screenW = resources.displayMetrics.widthPixels
         val screenH = resources.displayMetrics.heightPixels
 
@@ -460,32 +515,56 @@ class UniversalDragService : AccessibilityService() {
         var headerSelectedCount: Int? = null
         val headerCountRegex = Regex("(\\d+)\\s*개\\s*선택")
 
-        fun collectGalleryCells(node: AccessibilityNodeInfo?, depth: Int) {
-            if (node == null || !node.isVisibleToUser || depth > 35) return
+        // 삼성 갤러리 롱프레스 흰색 컨텍스트 메뉴(만들기 / 공유 / 삭제 / 클립보드에 복사 / 앨범으로 복사 / 앨범으로 이동) 감지용
+        val contextMenuItemKeywords = setOf(
+            "클립보드에 복사", "앨범으로 복사", "앨범으로 이동", "만들기", "휴지통으로 이동", "보안 폴더로 이동"
+        )
+        val contextMenuStrongKeywords = setOf("클립보드에 복사", "앨범으로 복사", "앨범으로 이동")
+        val matchedContextMenuRects = mutableListOf<Rect>()
+        var hasStrongContextMenuKeyword = false
+
+        val bottomNavTabNames = setOf("사진", "앨범", "스토리", "메뉴", "검색", "Pictures", "Albums", "Stories", "Menu")
+
+        fun scanGalleryTree(node: AccessibilityNodeInfo?, depth: Int) {
+            if (node == null || depth > 40) return
             val r = Rect()
             node.getBoundsInScreen(r)
+            if (r.width() <= 0 || r.height() <= 0) return
 
             val ownText = node.text?.toString()?.trim() ?: ""
             val ownDesc = node.contentDescription?.toString()?.trim() ?: ""
-            if (r.bottom < dp(185f)) {
-                val m = headerCountRegex.find(ownText) ?: headerCountRegex.find(ownDesc)
-                if (m != null) {
-                    headerSelectedCount = m.groupValues[1].toIntOrNull()
+            val ownState = node.stateDescription?.toString()?.trim() ?: ""
+
+            // 1) 상단 "N개 선택됨" 헤더 감지
+            val countMatch = headerCountRegex.find(ownText) ?: headerCountRegex.find(ownDesc) ?: headerCountRegex.find(ownState)
+            if (countMatch != null) {
+                headerSelectedCount = countMatch.groupValues[1].toIntOrNull()
+            }
+
+            // 2) 흰색 롱프레스 컨텍스트 메뉴 감지
+            val combinedLabel = if (ownText.isNotEmpty()) ownText else ownDesc
+            if (combinedLabel.isNotEmpty() && combinedLabel.length <= 20) {
+                if (contextMenuStrongKeywords.any { combinedLabel.contains(it) }) {
+                    hasStrongContextMenuKeyword = true
+                    matchedContextMenuRects.add(Rect(r))
+                } else if (contextMenuItemKeywords.any { combinedLabel.contains(it) }) {
+                    matchedContextMenuRects.add(Rect(r))
                 }
             }
 
-            if (r.top < dp(75f) || r.bottom > screenH - dp(85f)) {
-                for (i in 0 until node.childCount) collectGalleryCells(node.getChild(i), depth + 1)
+            // 3) 하단 네비게이션 탭 버튼(사진/앨범/스토리/메뉴) 자체만 스킵 (하단 썸네일은 스킵하지 않음)
+            if (combinedLabel in bottomNavTabNames && r.height() < dp(68f)) {
                 return
             }
 
-            val isThumbSize = r.width() in dp(45f)..(screenW * 0.68f).toInt() &&
-                              r.height() in dp(45f)..(screenH * 0.58f).toInt()
+            // 4) 썸네일 셀 및 사진 뷰 감지 (하단 작은 필름스트립 32dp부터 큰 사진 뷰까지)
+            val isMediaCellSize = r.width() in dp(32f)..screenW &&
+                                  r.height() in dp(32f)..(screenH * 0.88f).toInt()
 
             val descBuilder = StringBuilder()
-            node.contentDescription?.let { descBuilder.append(it).append(" ") }
-            node.stateDescription?.let { descBuilder.append(it).append(" ") }
-            node.text?.let { descBuilder.append(it).append(" ") }
+            if (ownDesc.isNotEmpty()) descBuilder.append(ownDesc).append(" ")
+            if (ownState.isNotEmpty()) descBuilder.append(ownState).append(" ")
+            if (ownText.isNotEmpty() && ownText !in bottomNavTabNames) descBuilder.append(ownText).append(" ")
 
             var childChecked = false
             for (i in 0 until node.childCount) {
@@ -500,48 +579,77 @@ class UniversalDragService : AccessibilityService() {
             }
             val fullCellDesc = descBuilder.toString().trim()
 
-            val hasMediaMetadata = fullCellDesc.contains("년") ||
-                    fullCellDesc.contains("월") ||
-                    fullCellDesc.contains("사진") ||
-                    fullCellDesc.contains("동영상") ||
-                    fullCellDesc.contains("GIF", true) ||
-                    fullCellDesc.contains("photo", true) ||
-                    fullCellDesc.contains("video", true)
+            // 컨텍스트 메뉴 항목 자체는 미디어 셀에서 제외
+            val isContextMenuRow = contextMenuStrongKeywords.any { fullCellDesc.contains(it) } ||
+                    fullCellDesc in setOf("만들기", "공유", "삭제", "클립보드에 복사", "앨범으로 복사", "앨범으로 이동")
 
-            val explicitlyChecked = node.isChecked || childChecked ||
-                    (node.stateDescription?.toString()?.contains("선택됨") == true) ||
-                    fullCellDesc.contains("선택됨") || fullCellDesc.contains("Selected", true)
+            if (!isContextMenuRow) {
+                val hasMediaMetadata = fullCellDesc.contains("년") ||
+                        fullCellDesc.contains("월") ||
+                        fullCellDesc.contains("사진") ||
+                        fullCellDesc.contains("이미지") ||
+                        fullCellDesc.contains("동영상") ||
+                        fullCellDesc.contains("GIF", true) ||
+                        fullCellDesc.contains("photo", true) ||
+                        fullCellDesc.contains("video", true) ||
+                        Regex("\\d{4}[-/.]\\d{1,2}[-/.]\\d{1,2}").containsMatchIn(fullCellDesc)
 
-            if (isThumbSize && hasMediaMetadata) {
-                val normalizedDesc = fullCellDesc
-                    .replace("선택됨", "")
-                    .replace("선택 안 됨", "")
-                    .replace("Selected", "", true)
-                    .replace("Not selected", "", true)
-                    .trim()
-                val cellKey = "${normalizedDesc}_${r.left / dp(28f)}_${r.top / dp(28f)}"
-                cells.add(GalleryCell(cellKey, r, fullCellDesc, explicitlyChecked))
-                return
+                val explicitlyChecked = node.isChecked || childChecked ||
+                        ownState.contains("선택됨") ||
+                        fullCellDesc.contains("선택됨") ||
+                        fullCellDesc.contains("Selected", true)
+
+                if (isMediaCellSize && (hasMediaMetadata || explicitlyChecked)) {
+                    val normalizedDesc = fullCellDesc
+                        .replace("선택됨", "")
+                        .replace("선택 안 됨", "")
+                        .replace("Selected", "", true)
+                        .replace("Not selected", "", true)
+                        .trim()
+                    val cellKey = "${normalizedDesc}_${r.left / dp(24f)}_${r.top / dp(24f)}"
+                    cells.add(GalleryCell(cellKey, r, fullCellDesc, explicitlyChecked))
+                    return
+                }
             }
 
             for (i in 0 until node.childCount) {
-                collectGalleryCells(node.getChild(i), depth + 1)
+                scanGalleryTree(node.getChild(i), depth + 1)
             }
         }
 
-        collectGalleryCells(root, 0)
-
-        val orderedCells = cells.sortedWith(compareBy<GalleryCell> { it.rect.top / dp(24f) }.thenBy { it.rect.left })
-        val checkedCells = orderedCells.filter { it.isExplicitlyChecked }
-        val uncheckedKeys = orderedCells.filter { !it.isExplicitlyChecked }.map { it.key }.toSet()
+        for (root in galleryRoots) {
+            scanGalleryTree(root, 0)
+        }
         val headerCount = headerSelectedCount
 
-        // 화면에서 체크 해제된 썸네일은 세션 캐시에서 제거
-        for (uk in uncheckedKeys) {
-            selectedGallerySessionMap.remove(uk)
+        val isGalleryContextMenuOpen = hasStrongContextMenuKeyword && matchedContextMenuRects.isNotEmpty()
+        val contextMenuUnionRect = if (isGalleryContextMenuOpen) {
+            Rect(matchedContextMenuRects.first()).apply {
+                for (mr in matchedContextMenuRects) union(mr)
+            }
+        } else null
+
+        val orderedCells = cells
+            .distinctBy { it.key }
+            .sortedWith(compareBy<GalleryCell> { it.rect.top / dp(24f) }.thenBy { it.rect.left })
+
+        val checkedCells = orderedCells.filter { it.isExplicitlyChecked }
+        val uncheckedKeys = orderedCells.filter { !it.isExplicitlyChecked }.map { it.key }.toSet()
+
+        // 컨텍스트 메뉴가 닫혀 있을 때만 체크 해제 항목 제거
+        if (!isGalleryContextMenuOpen) {
+            for (uk in uncheckedKeys) {
+                selectedGallerySessionMap.remove(uk)
+            }
         }
 
-        if (checkedCells.isEmpty() && !isExplicitLongPress && (headerCount == null || headerCount == 0)) {
+        val contextMenuJustOpened = isGalleryContextMenuOpen && !wasGalleryContextMenuVisible
+        wasGalleryContextMenuVisible = isGalleryContextMenuOpen
+
+        // 체크된 셀도 없고, 컨텍스트 메뉴도 없고, 명시적 롱프레스도 아니면 종료
+        if (checkedCells.isEmpty() && !isGalleryContextMenuOpen && !isExplicitLongPress &&
+            (headerCount == null || headerCount == 0)
+        ) {
             val hadGallerySelection = selectedGallerySessionMap.isNotEmpty() || visibleCheckedGalleryKeys.isNotEmpty()
             selectedGallerySessionMap.clear()
             visibleCheckedGalleryKeys.clear()
@@ -554,7 +662,7 @@ class UniversalDragService : AccessibilityService() {
         val currentCheckedKeySet = checkedCells.map { it.key }.toSet()
         val hasSelectionChanged = currentCheckedKeySet != visibleCheckedGalleryKeys
 
-        if (!isExplicitLongPress && !hasSelectionChanged) {
+        if (!isExplicitLongPress && !contextMenuJustOpened && !hasSelectionChanged && activeOverlayView != null) {
             return
         }
 
@@ -562,34 +670,37 @@ class UniversalDragService : AccessibilityService() {
         visibleCheckedGalleryKeys.clear()
         visibleCheckedGalleryKeys.addAll(currentCheckedKeySet)
 
-        // 기존 항목 중 체크 해제만 일어난 경우 스크린샷 없이 캐시로 즉시 팝업 갱신
-        if (newlyCheckedCells.isEmpty() && selectedGallerySessionMap.isNotEmpty()) {
-            val entries = selectedGallerySessionMap.values.toList()
-            val payload = buildMultiEntryPayload(entries, headerCount)
-            val anchor = checkedCells.lastOrNull()?.rect ?: initialLongPressRect
-            mainHandler.post {
-                showOrUpdateMediaOrFilePill(payload, anchor.centerX(), anchor.top)
+        // 해석할 대상 셀: 새로 체크된 셀 -> 체크된 셀 -> (메뉴/롱프레스 시) 꾹 누른 위치에 가장 가까운 셀 -> 가려진 경우 합성 셀
+        val targetCellsToResolve: List<GalleryCell> = when {
+            newlyCheckedCells.isNotEmpty() -> newlyCheckedCells
+            checkedCells.isNotEmpty() -> checkedCells
+            orderedCells.isNotEmpty() && (isGalleryContextMenuOpen || isExplicitLongPress) -> {
+                val refX = if (!initialLongPressRect.isEmpty) initialLongPressRect.centerX()
+                           else contextMenuUnionRect?.centerX() ?: (screenW / 2)
+                val refY = if (!initialLongPressRect.isEmpty) initialLongPressRect.centerY()
+                           else contextMenuUnionRect?.centerY() ?: (screenH / 2)
+                val closest = orderedCells.minByOrNull {
+                    hypot((it.rect.centerX() - refX).toDouble(), (it.rect.centerY() - refY).toDouble())
+                }
+                listOfNotNull(closest)
             }
-            return
-        }
-
-        val targetCellsToResolve = if (newlyCheckedCells.isNotEmpty()) {
-            newlyCheckedCells
-        } else if (checkedCells.isNotEmpty()) {
-            checkedCells
-        } else if (isExplicitLongPress) {
-            val closest = orderedCells.minByOrNull {
-                hypot(
-                    (it.rect.centerX() - initialLongPressRect.centerX()).toDouble(),
-                    (it.rect.centerY() - initialLongPressRect.centerY()).toDouble()
+            (isGalleryContextMenuOpen || isExplicitLongPress) && lastGalleryInteractedDesc.isNotEmpty() -> {
+                // 흰색 메뉴가 화면을 덮어 셀 정보가 가려진 경우: 마지막으로 꾹 누른 항목의 설명(날짜 등)으로 합성 셀 생성
+                val fallbackRect = if (!initialLongPressRect.isEmpty) initialLongPressRect
+                                   else contextMenuUnionRect ?: Rect(screenW / 4, screenH / 3, screenW * 3 / 4, screenH * 2 / 3)
+                listOf(
+                    GalleryCell(
+                        key = "gallery_active_${lastGalleryInteractedDesc.hashCode()}",
+                        rect = fallbackRect,
+                        desc = lastGalleryInteractedDesc,
+                        isExplicitlyChecked = true
+                    )
                 )
             }
-            if (closest != null) listOf(closest) else emptyList()
-        } else {
-            emptyList()
+            else -> emptyList()
         }
 
-        if (targetCellsToResolve.isEmpty()) return
+        if (targetCellsToResolve.isEmpty() && selectedGallerySessionMap.isEmpty()) return
 
         val firstCellRange = orderedCells.firstOrNull()?.let { parseGalleryDateRange(it.desc) }
         val lastCellRange = orderedCells.lastOrNull()?.let { parseGalleryDateRange(it.desc) }
@@ -599,83 +710,101 @@ class UniversalDragService : AccessibilityService() {
             false
         }
 
-        val anchorRect = targetCellsToResolve.last().rect
-
-        fun resolveCells(fullSwBitmap: Bitmap?) {
-            var unresolved = 0
-            for (cell in targetCellsToResolve) {
-                if (selectedGallerySessionMap.containsKey(cell.key)) continue
-
-                var cellCrop: Bitmap? = null
-                if (fullSwBitmap != null && cell.rect.width() > dp(32f) && cell.rect.height() > dp(32f)) {
-                    runCatching {
-                        val left = cell.rect.left.coerceIn(0, fullSwBitmap.width - 1)
-                        val top = cell.rect.top.coerceIn(0, fullSwBitmap.height - 1)
-                        val width = cell.rect.width().coerceIn(1, fullSwBitmap.width - left)
-                        val height = cell.rect.height().coerceIn(1, fullSwBitmap.height - top)
-                        cellCrop = Bitmap.createBitmap(fullSwBitmap, left, top, width, height)
-                    }
-                }
-
-                val cellDateRange = parseGalleryDateRange(cell.desc)
-                val sameTimeCells = if (cellDateRange != null) {
-                    orderedCells.filter {
-                        val r = parseGalleryDateRange(it.desc)
-                        r != null && r.first == cellDateRange.first && r.second == cellDateRange.second
-                    }
-                } else emptyList()
-                val idxInSameTime = sameTimeCells.indexOfFirst { it.key == cell.key }.coerceAtLeast(0)
-
-                val alreadyChosenUris = selectedGallerySessionMap.values.map { it.uri }.toSet()
-                val resolved = resolveExactGalleryMediaEntry(
-                    cellKey = cell.key,
-                    nodeDesc = cell.desc,
-                    screenCrop = cellCrop,
-                    sameTimeIndex = idxInSameTime,
-                    sameTimeTotal = sameTimeCells.size,
-                    isGridAscending = isGridAscendingOrder,
-                    excludeUris = alreadyChosenUris
-                )
-                if (resolved != null) {
-                    selectedGallerySessionMap[cell.key] = resolved
-                } else {
-                    unresolved++
-                }
+        // 팝업 위치: 흰색 컨텍스트 메뉴가 떠 있으면 메뉴 바로 위(또는 아래)에 배치해 가리지 않게 함
+        val anchorRect = when {
+            contextMenuUnionRect != null -> contextMenuUnionRect
+            targetCellsToResolve.isNotEmpty() -> targetCellsToResolve.last().rect
+            checkedCells.isNotEmpty() -> checkedCells.last().rect
+            else -> initialLongPressRect
+        }
+        val popupX = anchorRect.centerX().coerceIn(dp(80f), screenW - dp(80f))
+        val popupY = if (contextMenuUnionRect != null) {
+            if (contextMenuUnionRect.top > dp(120f)) {
+                contextMenuUnionRect.top - dp(12f)
+            } else {
+                (contextMenuUnionRect.bottom + dp(96f)).coerceAtMost(screenH - dp(80f))
             }
-
-            if (unresolved > 0) {
-                mainHandler.post {
-                    Toast.makeText(this, "원본을 확실히 찾지 못한 항목이 있어요. 공유 → ⚡ 원본 드래그를 써주세요", Toast.LENGTH_SHORT).show()
-                }
-            }
-
-            val allEntries = selectedGallerySessionMap.values.toList()
-            if (allEntries.isNotEmpty()) {
-                val payload = buildMultiEntryPayload(allEntries, headerCount)
-                mainHandler.post {
-                    showOrUpdateMediaOrFilePill(payload, anchorRect.centerX(), anchorRect.top)
-                }
-            }
+        } else {
+            anchorRect.top
         }
 
-        takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
-            override fun onSuccess(screenshot: ScreenshotResult) {
-                ioExecutor.execute {
-                    var fullSwBitmap: Bitmap? = null
-                    runCatching {
-                        val hwBuffer = screenshot.hardwareBuffer
-                        val hwBitmap = Bitmap.wrapHardwareBuffer(hwBuffer, screenshot.colorSpace)
-                        fullSwBitmap = hwBitmap?.copy(Bitmap.Config.ARGB_8888, false)
-                        hwBuffer.close()
-                    }
-                    resolveCells(fullSwBitmap)
+        fun resolveCell(cell: GalleryCell, crop: Bitmap?): ResolvedEntry? {
+            val cellDateRange = parseGalleryDateRange(cell.desc)
+            val sameTimeCells = if (cellDateRange != null) {
+                orderedCells.filter {
+                    val r = parseGalleryDateRange(it.desc)
+                    r != null && r.first == cellDateRange.first && r.second == cellDateRange.second
                 }
-            }
+            } else emptyList()
+            val idxInSameTime = sameTimeCells.indexOfFirst { it.key == cell.key }.coerceAtLeast(0)
+            return resolveExactGalleryMediaEntry(
+                cellKey = cell.key,
+                nodeDesc = cell.desc,
+                screenCrop = crop,
+                sameTimeIndex = idxInSameTime,
+                sameTimeTotal = sameTimeCells.size,
+                isGridAscending = isGridAscendingOrder,
+                excludeUris = selectedGallerySessionMap.values.map { it.uri }.toSet()
+            )
+        }
 
-            override fun onFailure(errorCode: Int) {
-                ioExecutor.execute { resolveCells(null) }
+        fun showResolvedEntries() {
+            val all = selectedGallerySessionMap.values.toList()
+            if (all.isEmpty()) return
+            val payload = buildMultiEntryPayload(all, headerCount)
+            mainHandler.post { showOrUpdateMediaOrFilePill(payload, popupX, popupY) }
+        }
+
+        ioExecutor.execute {
+            // [1단계] 날짜로 원본이 하나로 확정되는 항목은 스크린샷 없이 즉시 표시
+            val unresolved = mutableListOf<GalleryCell>()
+            for (cell in targetCellsToResolve) {
+                if (selectedGallerySessionMap.containsKey(cell.key)) continue
+                val fast = resolveCell(cell, null)
+                if (fast != null) selectedGallerySessionMap[cell.key] = fast else unresolved.add(cell)
             }
-        })
+            showResolvedEntries()
+            if (unresolved.isEmpty()) return@execute
+
+            // [2단계] 날짜만으로 확정되지 않은 항목은 화면 썸네일과 원본을 시각 비교 (확신할 때만 추가)
+            mainHandler.post {
+                takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+                    override fun onSuccess(screenshot: ScreenshotResult) {
+                        ioExecutor.execute {
+                            var fullBitmap: Bitmap? = null
+                            runCatching {
+                                val hwBuffer = screenshot.hardwareBuffer
+                                fullBitmap = Bitmap.wrapHardwareBuffer(hwBuffer, screenshot.colorSpace)
+                                    ?.copy(Bitmap.Config.ARGB_8888, false)
+                                hwBuffer.close()
+                            }
+                            val bmp = fullBitmap
+                            var missed = 0
+                            for (cell in unresolved) {
+                                var crop: Bitmap? = null
+                                if (bmp != null && cell.rect.width() > dp(32f) && cell.rect.height() > dp(32f)) {
+                                    runCatching {
+                                        val left = cell.rect.left.coerceIn(0, bmp.width - 1)
+                                        val top = cell.rect.top.coerceIn(0, bmp.height - 1)
+                                        val width = cell.rect.width().coerceIn(1, bmp.width - left)
+                                        val height = cell.rect.height().coerceIn(1, bmp.height - top)
+                                        crop = Bitmap.createBitmap(bmp, left, top, width, height)
+                                    }
+                                }
+                                val resolved = resolveCell(cell, crop)
+                                if (resolved != null) selectedGallerySessionMap[cell.key] = resolved else missed++
+                            }
+                            if (missed > 0) toast("원본을 확실히 찾지 못한 항목이 있어요. 공유 → ⚡ 원본 드래그를 써주세요")
+                            showResolvedEntries()
+                        }
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        toast("원본을 확실히 찾지 못했어요. 공유 → ⚡ 원본 드래그를 써주세요")
+                    }
+                })
+            }
+        }
     }
 
     /**
@@ -843,6 +972,9 @@ class UniversalDragService : AccessibilityService() {
             "삼성 패스에 저장", "Gemini에게 물어보기", "잘라내기", "Cut", "공유", "Share"
         )
 
+        // 갤러리 컨텍스트 메뉴(앨범으로 복사 등)는 텍스트 선택 툴바에서 제외
+        val galleryMenuExclusions = listOf("클립보드에 복사", "앨범으로 복사", "앨범으로 이동")
+
         data class ActionNodeItem(val label: String, val rect: Rect)
         val foundItems = mutableListOf<ActionNodeItem>()
 
@@ -851,7 +983,7 @@ class UniversalDragService : AccessibilityService() {
             val txt = (node.text?.toString()?.trim() ?: "").ifEmpty {
                 node.contentDescription?.toString()?.trim() ?: ""
             }
-            if (txt.isNotEmpty() && txt.length <= 18) {
+            if (txt.isNotEmpty() && txt.length <= 18 && galleryMenuExclusions.none { txt.contains(it) }) {
                 val matchedKeyword = selectionActionKeywords.any { kw ->
                     txt.equals(kw, ignoreCase = true) ||
                     txt.startsWith("$kw,", ignoreCase = true) ||
@@ -877,7 +1009,8 @@ class UniversalDragService : AccessibilityService() {
         for (w in allWindows) {
             if (w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
             val root = w.root ?: continue
-            if (root.packageName?.toString() == packageName) continue
+            val rootPkg = root.packageName?.toString() ?: ""
+            if (rootPkg == packageName || isGalleryApp(rootPkg)) continue
             val wb = Rect()
             w.getBoundsInScreen(wb)
             if (wb.height() !in 1..(screenH * 0.4f).toInt()) continue
@@ -1444,18 +1577,6 @@ class UniversalDragService : AccessibilityService() {
                 nodeDesc.contains("image", ignoreCase = true)
         )
 
-        val projection = arrayOf(
-            MediaStore.Files.FileColumns._ID,
-            MediaStore.Files.FileColumns.DISPLAY_NAME,
-            MediaStore.Files.FileColumns.MIME_TYPE,
-            MediaStore.Files.FileColumns.WIDTH,
-            MediaStore.Files.FileColumns.HEIGHT,
-            MediaStore.Files.FileColumns.MEDIA_TYPE,
-            MediaStore.MediaColumns.DATE_TAKEN,
-            MediaStore.MediaColumns.DATE_MODIFIED,
-            MediaStore.MediaColumns.RELATIVE_PATH
-        )
-
         data class MediaCandidate(
             val id: Long,
             val name: String,
@@ -1467,58 +1588,64 @@ class UniversalDragService : AccessibilityService() {
             val uri: Uri
         )
 
-        fun queryCandidates(extraWhere: String?, extraArgs: Array<String>?, limit: Int): List<MediaCandidate> {
-            val list = mutableListOf<MediaCandidate>()
-            val mediaFilter = when {
-                isVideoStrict -> "${MediaStore.Files.FileColumns.MEDIA_TYPE}=${MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO}"
-                isImageStrict -> "${MediaStore.Files.FileColumns.MEDIA_TYPE}=${MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE}"
-                else -> "(${MediaStore.Files.FileColumns.MEDIA_TYPE}=${MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE} OR ${MediaStore.Files.FileColumns.MEDIA_TYPE}=${MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO})"
-            }
-
-            var sel = "$mediaFilter AND " +
-                    "${MediaStore.MediaColumns.DISPLAY_NAME} NOT LIKE 'OrigDrag_%' AND " +
-                    "${MediaStore.MediaColumns.DISPLAY_NAME} NOT LIKE 'DragImage_%' AND " +
-                    "${MediaStore.MediaColumns.DISPLAY_NAME} NOT LIKE 'GalleryDrag_%' AND " +
-                    "${MediaStore.MediaColumns.DISPLAY_NAME} NOT LIKE 'Original_%'"
-
+        // [v11.0] Android 13~15에서 Files 컬렉션이 권한에 따라 비어 있을 수 있어 Images / Video 컬렉션을 직접 조회
+        fun queryCollection(collectionUri: Uri, isVidCollection: Boolean, extraWhere: String?, extraArgs: Array<String>?, limit: Int): List<MediaCandidate> {
+            val out = mutableListOf<MediaCandidate>()
+            val proj = arrayOf(
+                MediaStore.MediaColumns._ID,
+                MediaStore.MediaColumns.DISPLAY_NAME,
+                MediaStore.MediaColumns.MIME_TYPE,
+                MediaStore.MediaColumns.WIDTH,
+                MediaStore.MediaColumns.HEIGHT,
+                MediaStore.MediaColumns.DATE_TAKEN,
+                MediaStore.MediaColumns.DATE_MODIFIED,
+                MediaStore.MediaColumns.RELATIVE_PATH
+            )
+            var sel = "${MediaStore.MediaColumns.DISPLAY_NAME} NOT LIKE 'OrigDrag_%' AND " +
+                      "${MediaStore.MediaColumns.DISPLAY_NAME} NOT LIKE 'DragImage_%' AND " +
+                      "${MediaStore.MediaColumns.DISPLAY_NAME} NOT LIKE 'GalleryDrag_%' AND " +
+                      "${MediaStore.MediaColumns.DISPLAY_NAME} NOT LIKE 'Original_%'"
             if (!extraWhere.isNullOrEmpty()) {
                 sel = "$sel AND ($extraWhere)"
             }
 
             runCatching {
                 contentResolver.query(
-                    MediaStore.Files.getContentUri("external"),
-                    projection,
+                    collectionUri,
+                    proj,
                     sel,
                     extraArgs,
                     "${MediaStore.MediaColumns.DATE_TAKEN} DESC, ${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
                 )?.use { cursor ->
-                    var count = 0
-                    while (cursor.moveToNext() && count < limit) {
-                        val relPath = cursor.getString(8) ?: ""
+                    var c = 0
+                    while (cursor.moveToNext() && c < limit) {
+                        val relPath = cursor.getString(7) ?: ""
                         if (relPath.contains("UniversalDrag", ignoreCase = true)) continue
-
                         val id = cursor.getLong(0)
                         val name = cursor.getString(1) ?: "media"
-                        val mime = cursor.getString(2) ?: "image/jpeg"
+                        val mime = cursor.getString(2) ?: if (isVidCollection) "video/mp4" else "image/jpeg"
                         val w = cursor.getInt(3)
                         val h = cursor.getInt(4)
-                        val mediaType = cursor.getInt(5)
-                        val isVid = mediaType == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO || mime.startsWith("video/")
-                        val dateTaken = cursor.getLong(6)
-                        val dateModMs = cursor.getLong(7) * 1000L
-                        val effectiveTs = if (dateTaken > 0L) dateTaken else dateModMs
-
-                        val contentUri = ContentUris.withAppendedId(
-                            if (isVid) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                            id
-                        )
-                        list.add(MediaCandidate(id, name, mime, w, h, isVid, effectiveTs, contentUri))
-                        count++
+                        val dt = cursor.getLong(5)
+                        val dm = cursor.getLong(6) * 1000L
+                        val ts = if (dt > 0L) dt else dm
+                        out.add(MediaCandidate(id, name, mime, w, h, isVidCollection, ts, ContentUris.withAppendedId(collectionUri, id)))
+                        c++
                     }
                 }
             }
-            return list
+            return out
+        }
+
+        fun queryCandidates(extraWhere: String?, extraArgs: Array<String>?, limit: Int): List<MediaCandidate> {
+            val combined = mutableListOf<MediaCandidate>()
+            if (!isVideoStrict) {
+                combined.addAll(queryCollection(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, false, extraWhere, extraArgs, limit))
+            }
+            if (!isImageStrict) {
+                combined.addAll(queryCollection(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, true, extraWhere, extraArgs, limit))
+            }
+            return combined.sortedByDescending { it.timestampMs }.take(limit)
         }
 
         val parsedRange = parseGalleryDateRange(nodeDesc)
