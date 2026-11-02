@@ -17,15 +17,28 @@ class ShareReceiveActivity : Activity() {
             return
         }
 
-        if (intent?.action == Intent.ACTION_SEND) {
-            val streamUri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        when (intent?.action) {
+            Intent.ACTION_SEND -> {
+                val streamUri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                }
+                if (streamUri != null) {
+                    service.handleSharedUris(listOf(streamUri), intent.type)
+                }
             }
-            if (streamUri != null) {
-                service.handleSharedUri(streamUri, intent.type)
+            Intent.ACTION_SEND_MULTIPLE -> {
+                val uris: List<Uri>? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+                }
+                if (!uris.isNullOrEmpty()) {
+                    service.handleSharedUris(uris, intent.type)
+                }
             }
         }
         finish()

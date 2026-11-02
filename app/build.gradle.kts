@@ -14,7 +14,7 @@ android {
         minSdk = 30
         targetSdk = 35
         versionCode = autoVersionCode
-        versionName = "8.2.$autoVersionCode"
+        versionName = "10.0.$autoVersionCode"
     }
 
     signingConfigs {
@@ -54,9 +54,4 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
-}
-
-dependencies {
-    implementation("androidx.core:core-ktx:1.15.0")
-    implementation("androidx.draganddrop:draganddrop:1.0.0")
 }

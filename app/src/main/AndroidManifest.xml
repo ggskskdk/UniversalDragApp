@@ -46,20 +46,18 @@
             android:theme="@android:style/Theme.Translucent.NoTitleBar">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
 
+        <!-- 내 파일 원본(zip/apk/pdf 등)을 다른 앱에 읽기 전용으로 넘기는 공유 프로바이더 (권한 부여된 URI만 접근 가능) -->
         <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.fileprovider"
+            android:name=".FileShareProvider"
+            android:authorities="com.tools.universaldrag.files"
             android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/file_paths" />
-        </provider>
+            android:grantUriPermissions="true" />
 
         <service
             android:name=".UniversalDragService"

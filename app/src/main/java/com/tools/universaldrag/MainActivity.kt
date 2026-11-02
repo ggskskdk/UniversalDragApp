@@ -35,16 +35,16 @@ class MainActivity : Activity() {
         }
 
         val title = TextView(this).apply {
-            text = "Universal Drag 8.0"
+            text = "Universal Drag 10.0"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
         }
 
         val guide = TextView(this).apply {
-            text = "\n✅ v8.0 주요 해결 사항:\n" +
-                   "1. [카톡/채팅창 키보드 정상화]: 화면 터치·포커스를 가로채던 상시 오버레이를 완전 제거해 모든 앱에서 채팅 입력이 정상 작동합니다.\n" +
-                   "2. [실시간 드래그 텍스트만 표시]: 클립보드 내용을 띄우지 않고, 내가 지금 실시간으로 드래그한 텍스트만 검은색 팝업창에 표시합니다.\n" +
-                   "3. [갤러리 꾹 누른 원본 100% 매칭]: 갤러리 진입 시 자동 팝업을 차단하고, 내가 꾹 눌러 선택한 바로 그 사진/영상만 띄웁니다.\n"
+            text = "\n✅ v10.0 다중 선택 & 드래그 고도화:\n" +
+                   "1. [내 파일 & 갤러리 다중 체크 동기화]: 여러 개의 파일(ZIP, APK 등)이나 사진/영상을 추가로 체크하거나 해제할 때 실시간으로 개수가 갱신됩니다.\n" +
+                   "2. [스크롤 누적 세션 캐시]: 선택 모드에서 스크롤하며 체크한 모든 항목을 잃어버리지 않고 한 번에 묶어 드래그합니다.\n" +
+                   "3. [멀티 스택 섀도우 & 다중 전송]: 겹쳐진 카드 스택과 개수 배지를 표시하며, 모든 원본 파일을 타겟 앱에 일괄 드롭합니다.\n"
             setTextColor(Color.parseColor("#A1A1AA"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
         }
@@ -57,7 +57,7 @@ class MainActivity : Activity() {
         }
 
         val btnStorage = Button(this).apply {
-            text = "2. 모든 파일(갤러리 원본) 권한 허용"
+            text = "2. 모든 파일(내 파일/갤러리 원본) 권한 허용"
             setOnClickListener {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
                     val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
