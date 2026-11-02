@@ -331,9 +331,15 @@ class UniversalDragService : AccessibilityService() {
      * - 상단 "N개 선택됨" 모드가 유지되는 동안 스크롤되어 지나간 파일도 세션 캐시에 보존
      * - 모든 체크가 해제되면 팝업 자동 닫힘
      */
-    private fun syncMyFilesMultiSelection(initialRect: Rect, isExplicitLongPress: Boolean) {
-        val roots = collectAppRoots(::isMyFilesApp)
-        if (roots.isEmpty()) return
+    // [v11.1] 갤러리 목록 보기(파일명 행)도 같은 로직으로 처리. 파일명 행이 없으면 false (갤러리 썸네일 로직으로 넘어감)
+    private fun syncMyFilesMultiSelection(
+        initialRect: Rect,
+        isExplicitLongPress: Boolean,
+        appPredicate: (String) -> Boolean = ::isMyFilesApp,
+        fileNameRowsOnly: Boolean = false
+    ): Boolean {
+        val roots = collectAppRoots(appPredicate)
+        if (roots.isEmpty()) return false
         val screenH = resources.displayMetrics.heightPixels
 
         data class VisibleFileRow(
@@ -363,7 +369,7 @@ class UniversalDragService : AccessibilityService() {
             }
 
             val isRowBounds = hr.width() > dp(180f) && hr.height() in dp(40f)..dp(170f) &&
-                              hr.top in dp(45f)..(screenH - dp(20f))
+                              hr.top in (if (fileNameRowsOnly) 0 else dp(45f))..(screenH - dp(20f))
 
             if (isRowBounds && node.childCount >= 1) {
                 var rowChecked = node.isChecked || node.isSelected ||
@@ -394,7 +400,7 @@ class UniversalDragService : AccessibilityService() {
                 inspectRowChildren(node, 0)
 
                 val candidateName = rowTexts.firstOrNull { fileNameRegex.matches(it) }
-                    ?: rowTexts.firstOrNull {
+                    ?: if (fileNameRowsOnly) null else rowTexts.firstOrNull {
                         it.length >= 3 && !it.contains("월") && !it.endsWith("B") &&
                         !it.contains("선택") && !it.contains("오전") && !it.contains("오후")
                     }
@@ -417,6 +423,7 @@ class UniversalDragService : AccessibilityService() {
         for (r in roots) scanMyFiles(r, 0)
 
         val distinctVisible = visibleRows.distinctBy { it.fileName }
+        if (fileNameRowsOnly && distinctVisible.isEmpty()) return false
         val currentlyCheckedVisible = distinctVisible.filter { it.isChecked }
         val currentlyUncheckedVisibleNames = distinctVisible.filter { !it.isChecked }.map { it.fileName }.toSet()
 
@@ -433,19 +440,19 @@ class UniversalDragService : AccessibilityService() {
             if (hadSelection && currentPayload?.type != PayloadType.TEXT) {
                 removeActiveOverlay()
             }
-            return
+            return true
         }
 
         val currentVisibleCheckedSet = currentlyCheckedVisible.map { it.fileName }.toSet()
         val hasChange = currentVisibleCheckedSet != visibleCheckedMyFilesKeys
 
         if (!isExplicitLongPress && !hasChange && activeOverlayView != null) {
-            return
+            return true
         }
         visibleCheckedMyFilesKeys.clear()
         visibleCheckedMyFilesKeys.addAll(currentVisibleCheckedSet)
 
-        val anchorRow = currentlyCheckedVisible.lastOrNull() ?: return
+        val anchorRow = currentlyCheckedVisible.lastOrNull() ?: return true
         val headerCount = headerSelectedCount
 
         ioExecutor.execute {
@@ -481,13 +488,17 @@ class UniversalDragService : AccessibilityService() {
             }
 
             val allEntries = selectedMyFilesSessionMap.values.toList()
-            if (allEntries.isEmpty()) return@execute
+            if (allEntries.isEmpty()) {
+                toast("선택한 파일의 원본 위치를 찾지 못했어요. 파일 접근 권한(모든 파일)을 확인해주세요")
+                return@execute
+            }
 
             val payload = buildMultiEntryPayload(allEntries, headerCount)
             mainHandler.post {
                 showOrUpdateMediaOrFilePill(payload, anchorRow.rect.centerX(), anchorRow.rect.top)
             }
         }
+        return true
     }
 
     /**
@@ -498,6 +509,8 @@ class UniversalDragService : AccessibilityService() {
      * - 날짜로 원본이 하나로 확정되면 스크린샷 없이 즉시 표시하고, 나머지만 스크린샷 시각 매칭(확신할 때만)
      */
     private fun syncGalleryMultiSelection(initialLongPressRect: Rect, isExplicitLongPress: Boolean) {
+        // 목록 보기에서 파일명이 보이면 이름으로 정확히 찾음 (zip/apk 등 비미디어 포함)
+        if (syncMyFilesMultiSelection(initialLongPressRect, isExplicitLongPress, ::isGalleryApp, fileNameRowsOnly = true)) return
         val galleryRoots = collectAppRoots(::isGalleryApp)
         if (galleryRoots.isEmpty()) return
 
