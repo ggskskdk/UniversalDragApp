@@ -423,7 +423,15 @@ class UniversalDragService : AccessibilityService() {
         for (r in roots) scanMyFiles(r, 0)
 
         val distinctVisible = visibleRows.distinctBy { it.fileName }
-        if (fileNameRowsOnly && distinctVisible.isEmpty()) return false
+        if (fileNameRowsOnly && distinctVisible.isEmpty()) {
+            // 선택 모드가 끝나 체크박스가 사라진 경우: 이전 선택이 다음 꾹 누르기에 남지 않게 초기화
+            if (selectedMyFilesSessionMap.isNotEmpty() || visibleCheckedMyFilesKeys.isNotEmpty()) {
+                selectedMyFilesSessionMap.clear()
+                visibleCheckedMyFilesKeys.clear()
+                if (currentPayload?.type != PayloadType.TEXT) removeActiveOverlay()
+            }
+            return false
+        }
         val currentlyCheckedVisible = distinctVisible.filter { it.isChecked }
         val currentlyUncheckedVisibleNames = distinctVisible.filter { !it.isChecked }.map { it.fileName }.toSet()
 
@@ -444,6 +452,11 @@ class UniversalDragService : AccessibilityService() {
         }
 
         val currentVisibleCheckedSet = currentlyCheckedVisible.map { it.fileName }.toSet()
+        // 화면에 보이는 체크 항목이 헤더 개수만큼(또는 새 꾹 누르기로 1개) 이면 그게 전체 선택: 남은 이전 항목 제거
+        val hc = headerSelectedCount
+        if ((hc != null && currentVisibleCheckedSet.size >= hc) || (isExplicitLongPress && (hc ?: 0) <= 1)) {
+            selectedMyFilesSessionMap.keys.retainAll(currentVisibleCheckedSet)
+        }
         val hasChange = currentVisibleCheckedSet != visibleCheckedMyFilesKeys
 
         if (!isExplicitLongPress && !hasChange && activeOverlayView != null) {
@@ -673,6 +686,13 @@ class UniversalDragService : AccessibilityService() {
         }
 
         val currentCheckedKeySet = checkedCells.map { it.key }.toSet()
+        // 새 꾹 누르기(선택 1개 이하) 또는 보이는 체크 셀이 전체 선택이면 이전 선택 제거
+        if (isExplicitLongPress && (headerCount ?: 0) <= 1) {
+            selectedGallerySessionMap.clear()
+            visibleCheckedGalleryKeys.clear()
+        } else if (headerCount != null && checkedCells.isNotEmpty() && checkedCells.size >= headerCount) {
+            selectedGallerySessionMap.keys.retainAll(currentCheckedKeySet)
+        }
         val hasSelectionChanged = currentCheckedKeySet != visibleCheckedGalleryKeys
 
         if (!isExplicitLongPress && !contextMenuJustOpened && !hasSelectionChanged && activeOverlayView != null) {
