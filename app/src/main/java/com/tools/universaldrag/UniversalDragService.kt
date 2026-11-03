@@ -270,6 +270,13 @@ class UniversalDragService : AccessibilityService() {
 
         // [B] 갤러리 앱 (com.sec.android.gallery3d)
         if (isGalleryApp(pkgName)) {
+            if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+                galleryEventLog.addLast(AccessibilityEvent.eventTypeToString(event.eventType).removePrefix("TYPE_"))
+                while (galleryEventLog.size > 30) galleryEventLog.removeFirst()
+            }
+            if (event.eventType == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED) {
+                mainHandler.postDelayed({ dumpGalleryDebug(collectAppRoots(::isGalleryApp), "long-click") }, 400L)
+            }
             when (event.eventType) {
                 AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
@@ -561,6 +568,7 @@ class UniversalDragService : AccessibilityService() {
      */
     private fun syncGalleryMultiSelection(initialLongPressRect: Rect, isExplicitLongPress: Boolean) {
         if (isGlobalDragging) return
+        if (pendingGalleryClipboard && activeOverlayView != null) return
         // 목록 보기에서 파일명이 보이면 이름으로 정확히 찾음 (zip/apk 등 비미디어 포함)
         if (syncMyFilesMultiSelection(initialLongPressRect, isExplicitLongPress, ::isGalleryApp, fileNameRowsOnly = true)) return
         val galleryRoots = collectAppRoots(::isGalleryApp)
@@ -833,6 +841,14 @@ class UniversalDragService : AccessibilityService() {
             }
         } else {
             anchorRect.top.coerceIn(dp(130f), screenH - dp(190f))
+        }
+
+        dumpGalleryDebug(galleryRoots, "selection state: cells=${cells.size} checked=${checkedCells.size} count=$targetCount menu=$isGalleryContextMenuOpen bar=$isSelectionActionBarVisible album=$lastActiveAlbumTitle")
+
+        // [v12.1] 흰색 메뉴가 떠 있으면 추측하지 않고, 팝업을 잡는 순간 갤러리의 "클립보드에 복사"로 정확한 원본을 받아옴
+        if (isGalleryContextMenuOpen) {
+            mainHandler.post { showPendingGalleryClipboardPill(targetCount, popupX, popupY) }
+            return
         }
 
         // 선택된 썸네일들의 그리드 인덱스 (0..N-1) 파악
@@ -2256,10 +2272,13 @@ class UniversalDragService : AccessibilityService() {
                         lastDropX = ev.rawX
                         lastDropY = ev.rawY
                         mainHandler.removeCallbacks(autoDismissRunnable)
+                        if (pendingGalleryClipboard && currentPayload?.uri == null) fetchGallerySelectionViaClipboard()
                         true
                     }
                     MotionEvent.ACTION_MOVE -> {
                         val activePayload = currentPayload ?: payload
+                        // 원본을 받아오는 중이면 손가락을 유지한 채 기다렸다가 받아온 뒤 드래그 시작
+                        if (activePayload.type != PayloadType.TEXT && activePayload.uri == null) return@setOnTouchListener true
                         if (!isGlobalDragging && hypot((ev.rawX - downX).toDouble(), (ev.rawY - downY).toDouble()) > dp(6f)) {
                             startGlobalDragSession(container, activePayload)
                         }
@@ -2446,6 +2465,154 @@ class UniversalDragService : AccessibilityService() {
         dragTrackerView = tracker
         trackerParams = params
         runCatching { windowManager.addView(tracker, params) }
+    }
+
+    // ---------------- [v12.1] 갤러리 "클립보드에 복사"로 정확한 원본 받기 ----------------
+    private var pendingGalleryClipboard = false
+    private var galleryClipFetchRunning = false
+
+    private fun showPendingGalleryClipboardPill(count: Int, x: Int, y: Int) {
+        if (activeOverlayView != null && pendingGalleryClipboard) return
+        pendingGalleryClipboard = true
+        val payload = DragPayload(
+            type = PayloadType.IMAGE,
+            uri = null,
+            allMimeTypes = listOf("image/*"),
+            mimeType = "image/*",
+            displayName = "갤러리 선택 항목",
+            subtitleSummary = "잡으면 갤러리에서 원본을 가져와요",
+            totalCount = max(1, count)
+        )
+        showQuickDragPill(payload, x, y)
+        mainHandler.post { pendingGalleryClipboard = true }
+    }
+
+    private fun findGalleryNodeByLabel(label: String): AccessibilityNodeInfo? {
+        fun walk(n: AccessibilityNodeInfo?, d: Int): AccessibilityNodeInfo? {
+            if (n == null || d > 40) return null
+            val t = n.text?.toString()?.trim() ?: n.contentDescription?.toString()?.trim() ?: ""
+            if (t == label) return n
+            for (i in 0 until n.childCount) walk(n.getChild(i), d + 1)?.let { return it }
+            return null
+        }
+        for (r in collectAppRoots(::isGalleryApp)) walk(r, 0)?.let { return it }
+        return null
+    }
+
+    // ponytail: Android 10+ only lets the focused window read the clipboard, so the pill briefly takes focus
+    private fun readClipboardWithFocus(cb: (ClipData?) -> Unit) {
+        val v = activeOverlayView
+        val lp = activeOverlayParams
+        if (v == null || lp == null) { cb(runCatching { clipboardManager.primaryClip }.getOrNull()); return }
+        lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+        runCatching { windowManager.updateViewLayout(v, lp) }
+        mainHandler.postDelayed({
+            val clip = runCatching { clipboardManager.primaryClip }.getOrNull()
+            lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            if (activeOverlayView === v) runCatching { windowManager.updateViewLayout(v, lp) }
+            cb(clip)
+        }, 70L)
+    }
+
+    private fun fetchGallerySelectionViaClipboard() {
+        if (galleryClipFetchRunning) return
+        var node = findGalleryNodeByLabel("클립보드에 복사")
+        while (node != null && !node.isClickable) node = node.parent
+        if (node == null) {
+            Toast.makeText(this, "갤러리 메뉴의 '클립보드에 복사'를 찾지 못했어요", Toast.LENGTH_SHORT).show()
+            return
+        }
+        galleryClipFetchRunning = true
+        wasGalleryContextMenuVisible = false // 메뉴는 복사 클릭으로 닫히므로 드래그 시작 때 BACK을 보내지 않음
+        val clickedAt = System.currentTimeMillis()
+        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+
+        var tries = 0
+        fun poll() {
+            readClipboardWithFocus { clip ->
+                val fresh = clip != null && clip.itemCount > 0 && clip.getItemAt(0).uri != null &&
+                        clip.description.timestamp >= clickedAt - 300L
+                if (fresh) {
+                    val uris = (0 until clip!!.itemCount).mapNotNull { clip.getItemAt(it).uri }
+                    ioExecutor.execute {
+                        val entries = uris.mapIndexedNotNull { i, u -> clipUriToEntry(u, i) }
+                        mainHandler.post {
+                            galleryClipFetchRunning = false
+                            if (entries.isEmpty()) {
+                                Toast.makeText(this, "갤러리 원본을 읽지 못했어요", Toast.LENGTH_SHORT).show()
+                                return@post
+                            }
+                            val p = buildMultiEntryPayload(entries, entries.size)
+                            showOrUpdateMediaOrFilePill(p, 0, 0)
+                        }
+                    }
+                } else if (++tries < 12) {
+                    mainHandler.postDelayed({ poll() }, 120L)
+                } else {
+                    galleryClipFetchRunning = false
+                    Toast.makeText(this, "갤러리에서 복사된 원본을 받지 못했어요. 공유 → ⚡ 원본 드래그를 써주세요", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        mainHandler.postDelayed({ poll() }, 150L)
+    }
+
+    private fun clipUriToEntry(src: Uri, idx: Int): ResolvedEntry? = runCatching {
+        val mime = contentResolver.getType(src) ?: "image/jpeg"
+        var name = "gallery_$idx"
+        contentResolver.query(src, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+            if (it.moveToFirst()) it.getString(0)?.let { n -> name = n }
+        }
+        // MediaStore URI는 그대로, 갤러리 자체 URI는 우리 권한으로 넘길 수 없어 캐시에 복사 후 공유
+        val uri = if (src.authority == MediaStore.AUTHORITY) src else {
+            val dir = File(cacheDir, "gallery_clip").apply { mkdirs() }
+            val out = File(dir, name.replace('/', '_'))
+            contentResolver.openInputStream(src)?.use { input -> out.outputStream().use { input.copyTo(it) } } ?: return null
+            FileShareProvider.uriFor(this, out)
+        }
+        val isVid = mime.startsWith("video/")
+        val meta = if (idx < 3) (if (isVid) extractVideoFrameAndSize(uri) else decodeSampledPreview(uri)) else null
+        ResolvedEntry(
+            key = "clip_${idx}_$name", uri = uri, mimeType = mime, displayName = name,
+            width = meta?.second ?: 0, height = meta?.third ?: 0, previewBitmap = meta?.first,
+            isVideo = isVid, isImage = mime.startsWith("image/")
+        )
+    }.getOrNull()
+
+    // ponytail: debug dump so a failing gallery screen can be diagnosed from one file; remove once gallery is stable
+    private val galleryEventLog = ArrayDeque<String>()
+    private var lastGalleryDumpAt = 0L
+    private var galleryDumpToastShown = false
+    private fun dumpGalleryDebug(roots: List<AccessibilityNodeInfo>, reason: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastGalleryDumpAt < 5000L || roots.isEmpty()) return
+        lastGalleryDumpAt = now
+        val sb = StringBuilder("reason: $reason\nevents: ${galleryEventLog.joinToString()}\n\n")
+        fun walk(n: AccessibilityNodeInfo?, d: Int) {
+            if (n == null || d > 40) return
+            val r = Rect(); n.getBoundsInScreen(r)
+            sb.append("  ".repeat(d)).append(n.className?.toString()?.substringAfterLast('.'))
+                .append(" ").append(r.toShortString())
+                .append(" t=").append(n.text?.toString()?.take(40))
+                .append(" d=").append(n.contentDescription?.toString()?.take(80))
+                .append(" s=").append(n.stateDescription)
+                .append(if (n.isCheckable) " checkable" else "").append(if (n.isChecked) " CHECKED" else "")
+                .append(if (n.isSelected) " SELECTED" else "").append(if (n.isClickable) " click" else "")
+                .append(if (n.isLongClickable) " long" else "")
+                .append(" id=").append(n.viewIdResourceName?.substringAfterLast('/')).append('\n')
+            for (i in 0 until n.childCount) walk(n.getChild(i), d + 1)
+        }
+        roots.forEach { walk(it, 0); sb.append("\n----\n") }
+        ioExecutor.execute {
+            runCatching {
+                val f = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "UniversalDrag_gallery_debug.txt")
+                f.writeText(sb.toString())
+                if (!galleryDumpToastShown) {
+                    galleryDumpToastShown = true
+                    mainHandler.post { Toast.makeText(this, "갤러리 화면 구조 기록: Download/UniversalDrag_gallery_debug.txt", Toast.LENGTH_SHORT).show() }
+                }
+            }
+        }
     }
 
     private fun removeDragTracker() {
@@ -2736,6 +2903,7 @@ class UniversalDragService : AccessibilityService() {
     }
 
     private fun removeActiveOverlay() {
+        pendingGalleryClipboard = false
         mainHandler.removeCallbacks(autoDismissRunnable)
         activeOverlayView?.let {
             runCatching { windowManager.removeView(it) }
