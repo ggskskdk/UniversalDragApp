@@ -14,7 +14,7 @@ android {
         minSdk = 30
         targetSdk = 35
         versionCode = autoVersionCode
-        versionName = "11.4.$autoVersionCode"
+        versionName = "12.0.$autoVersionCode"
     }
 
     signingConfigs {
@@ -55,3 +55,4 @@ android {
         jvmTarget = "17"
     }
 }
+

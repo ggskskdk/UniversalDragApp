@@ -35,16 +35,16 @@ class MainActivity : Activity() {
         }
 
         val title = TextView(this).apply {
-            text = "Universal Drag 11.0"
+            text = "Universal Drag 12.0"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
         }
 
         val guide = TextView(this).apply {
-            text = "\n✅ v11.0 갤러리 컨텍스트 메뉴 & 썸네일 대응:\n" +
-                   "1. [갤러리 흰색 팝업 메뉴 감지]: 사진을 꾹 눌러 '만들기/공유/삭제/클립보드에 복사' 메뉴가 뜰 때도 뒤쪽 갤러리 창을 함께 스캔해 검은색 드래그 팝업을 띄웁니다.\n" +
-                   "2. [하단 필름스트립 & 큰 사진 뷰 지원]: 화면 맨 아래쪽 썸네일과 큰 사진 보기 화면에서도 동작합니다.\n" +
-                   "3. [빠른 팝업]: 날짜로 원본이 확정되면 스크린샷 없이 바로 띄우고, 애매한 사진만 화면과 비교해 확실할 때만 띄웁니다.\n"
+            text = "\n✅ v12.0 갤러리 앨범 선택 모드 완벽 수정:\n" +
+                   "1. [One UI 갤러리 선택 바 감지]: 좌상단 숫자 배지(1, 2...), 우상단 '취소' 버튼, 하단 '만들기/공유/삭제/더보기' 바가 뜨는 즉시 팝업이 표시됩니다.\n" +
+                   "2. [앨범 폴더 직결 매칭]: 현재 열린 앨범명(예: 느노어어)과 동일한 실제 폴더 및 MediaStore 버킷에서 원본 이미지를 즉시 연결합니다.\n" +
+                   "3. [조기 return 버그 수정]: 앨범 헤더('이미지 5개') 때문에 하위 썸네일 스캔이 중단되던 문제를 해결했습니다.\n"
             setTextColor(Color.parseColor("#A1A1AA"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
         }

@@ -92,7 +92,6 @@ class UniversalDragShadowBuilder(
             shadowH - pad - stackOffset * 0.5f
         )
 
-        // 다중 선택 시 뒤에 겹쳐진 스택 카드 효과 렌더링
         if (itemCount > 1) {
             if (itemCount >= 3) {
                 val backRect2 = RectF(mainRect).apply { offset(stackOffset * 0.9f, -stackOffset * 0.45f) }
@@ -147,7 +146,6 @@ class UniversalDragShadowBuilder(
             }
         }
 
-        // 우상단 다중 선택 개수 원형 배지 (2개 이상일 때 표시)
         if (itemCount > 1) {
             val badgeRadius = 13f * density
             val cx = mainRect.right - 4f * density
