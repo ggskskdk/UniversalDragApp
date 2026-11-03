@@ -268,6 +268,10 @@ class UniversalDragService : AccessibilityService() {
 
         // [B] 갤러리 앱 (com.sec.android.gallery3d) 다중 선택 실시간 동기화
         if (isGalleryApp(pkgName)) {
+            if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+                galleryEventLog.addLast(AccessibilityEvent.eventTypeToString(event.eventType).removePrefix("TYPE_"))
+                while (galleryEventLog.size > 30) galleryEventLog.removeFirst()
+            }
             when (event.eventType) {
                 AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> {
                     rememberGalleryInteraction(event.source)
@@ -298,13 +302,13 @@ class UniversalDragService : AccessibilityService() {
                     lastRealtimeTextTimestamp = System.currentTimeMillis()
                     lastSelectionBounds = bounds
 
+                    // [v11.4] 사용자가 실제로 선택했을 때만 뜨는 복사/전체선택 툴바가 있어야 표시 (앱이 내부적으로 보내는 가짜 선택 이벤트 무시)
                     val toolbarInfo = findFloatingSelectionToolbar()
-                    val anchorRect = toolbarInfo?.first ?: bounds
-                    showOrUpdateRealtimeTextPill(
-                        selectedText = selText,
-                        anchorRect = anchorRect,
-                        copyBtnRect = toolbarInfo?.second
-                    )
+                    if (toolbarInfo != null) {
+                        showOrUpdateRealtimeTextPill(selText, toolbarInfo.first, toolbarInfo.second)
+                    } else {
+                        scheduleScan { handleWindowContentChangedForTextSelection(System.currentTimeMillis()) }
+                    }
                 } else {
                     val src = event.source
                     if (src != null && src.textSelectionStart > 0 && src.textSelectionStart == src.textSelectionEnd) {
@@ -324,6 +328,37 @@ class UniversalDragService : AccessibilityService() {
 
     // ponytail: only long-press/tap sources are remembered; content-change sources are whole grids and would
     // point the "closest cell" lookup at the middle of the screen
+    // ponytail: debug dump so a failing gallery screen can be diagnosed from one file; remove once gallery is stable
+    private val galleryEventLog = ArrayDeque<String>()
+    private var lastGalleryDumpAt = 0L
+    private fun dumpGalleryDebug(roots: List<AccessibilityNodeInfo>, reason: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastGalleryDumpAt < 8000L) return
+        lastGalleryDumpAt = now
+        val sb = StringBuilder("reason: $reason\nevents: ${galleryEventLog.joinToString()}\n\n")
+        fun walk(n: AccessibilityNodeInfo?, d: Int) {
+            if (n == null || d > 40) return
+            val r = Rect(); n.getBoundsInScreen(r)
+            sb.append("  ".repeat(d)).append(n.className?.toString()?.substringAfterLast('.'))
+                .append(" ").append(r.toShortString())
+                .append(" t=").append(n.text?.toString()?.take(40))
+                .append(" d=").append(n.contentDescription?.toString()?.take(80))
+                .append(" s=").append(n.stateDescription)
+                .append(if (n.isCheckable) " checkable" else "").append(if (n.isChecked) " CHECKED" else "")
+                .append(if (n.isSelected) " SELECTED" else "").append(if (n.isLongClickable) " long" else "")
+                .append(" id=").append(n.viewIdResourceName?.substringAfterLast('/')).append('\n')
+            for (i in 0 until n.childCount) walk(n.getChild(i), d + 1)
+        }
+        roots.forEach { walk(it, 0); sb.append("\n----\n") }
+        ioExecutor.execute {
+            runCatching {
+                val f = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "UniversalDrag_gallery_debug.txt")
+                f.writeText(sb.toString())
+                toast("갤러리 인식 실패 기록: Download/UniversalDrag_gallery_debug.txt 를 보내주세요")
+            }
+        }
+    }
+
     private fun rememberGalleryInteraction(src: AccessibilityNodeInfo?) {
         if (src == null) return
         val r = Rect()
@@ -584,6 +619,23 @@ class UniversalDragService : AccessibilityService() {
 
         val bottomNavTabNames = setOf("사진", "앨범", "스토리", "메뉴", "검색", "Pictures", "Albums", "Stories", "Menu")
 
+        // [v11.4] One UI 8 갤러리: 체크 원이 셀의 손자/형제 뷰로 따로 그려짐 -> 체크 표시와 셀 박스를 따로 모아 위치로 짝지음
+        val checkMarks = mutableListOf<Pair<Rect, Boolean>>()
+        val cellBoxes = mutableListOf<Pair<Rect, String>>()
+        var hasCancelButton = false
+        var bareDigitHeader: Int? = null
+        fun isCheckedNode(n: AccessibilityNodeInfo): Boolean {
+            val st = n.stateDescription?.toString() ?: ""
+            val cd = n.contentDescription?.toString() ?: ""
+            return n.isChecked || st.contains("선택됨") || cd.contains("선택됨") || st.equals("Selected", true)
+        }
+        fun hasCheckedDescendant(n: AccessibilityNodeInfo?, d: Int): Boolean {
+            if (n == null || d > 4) return false
+            if (d > 0 && isCheckedNode(n)) return true
+            for (i in 0 until n.childCount) if (hasCheckedDescendant(n.getChild(i), d + 1)) return true
+            return false
+        }
+
         fun scanGalleryTree(node: AccessibilityNodeInfo?, depth: Int) {
             if (node == null || depth > 40) return
             val r = Rect()
@@ -611,6 +663,19 @@ class UniversalDragService : AccessibilityService() {
                 }
             }
 
+            // 2-1) 선택 모드 헤더: "취소" 버튼 + 숫자만 있는 선택 개수
+            if (r.top < dp(140f)) {
+                if (combinedLabel == "취소" || combinedLabel.equals("Cancel", true)) hasCancelButton = true
+                if (ownText.matches(Regex("\\d{1,4}"))) bareDigitHeader = ownText.toIntOrNull()
+            }
+            // 2-2) 작은 체크 원 수집
+            val clsName = node.className?.toString() ?: ""
+            if ((node.isCheckable || clsName.contains("CheckBox", true) || clsName.contains("RadioButton", true)) &&
+                r.width() < dp(56f) && r.height() < dp(56f)
+            ) {
+                checkMarks.add(Rect(r) to isCheckedNode(node))
+            }
+
             // 3) 하단 네비게이션 탭 버튼(사진/앨범/스토리/메뉴) 자체만 스킵 (하단 썸네일은 스킵하지 않음)
             if (combinedLabel in bottomNavTabNames && r.height() < dp(68f)) {
                 return
@@ -619,6 +684,11 @@ class UniversalDragService : AccessibilityService() {
             // 4) 썸네일 셀 및 사진 뷰 감지 (하단 작은 필름스트립 32dp부터 큰 사진 뷰까지)
             val isMediaCellSize = r.width() in dp(32f)..screenW &&
                                   r.height() in dp(32f)..(screenH * 0.88f).toInt()
+            if (r.width() >= dp(56f) && r.height() >= dp(56f) && r.width() < screenW * 0.95f &&
+                r.height() < screenH * 0.6f && (node.isClickable || node.isLongClickable || clsName.contains("Image"))
+            ) {
+                cellBoxes.add(Rect(r) to (if (ownDesc.isNotEmpty()) ownDesc else ownText))
+            }
 
             val descBuilder = StringBuilder()
             if (ownDesc.isNotEmpty()) descBuilder.append(ownDesc).append(" ")
@@ -653,7 +723,7 @@ class UniversalDragService : AccessibilityService() {
                         fullCellDesc.contains("video", true) ||
                         Regex("\\d{4}[-/.]\\d{1,2}[-/.]\\d{1,2}").containsMatchIn(fullCellDesc)
 
-                val explicitlyChecked = node.isChecked || childChecked ||
+                val explicitlyChecked = node.isChecked || childChecked || hasCheckedDescendant(node, 0) ||
                         ownState.contains("선택됨") ||
                         fullCellDesc.contains("선택됨") ||
                         fullCellDesc.contains("Selected", true)
@@ -679,6 +749,18 @@ class UniversalDragService : AccessibilityService() {
         for (root in galleryRoots) {
             scanGalleryTree(root, 0)
         }
+        // 체크 원을 담고 있는 가장 작은 셀 박스에 체크 상태를 반영
+        for ((mr, checked) in checkMarks) {
+            val idx = cells.indexOfFirst { it.rect.contains(mr.centerX(), mr.centerY()) }
+            if (idx >= 0) {
+                if (checked && !cells[idx].isExplicitlyChecked) cells[idx] = cells[idx].copy(isExplicitlyChecked = true)
+                continue
+            }
+            val box = cellBoxes.filter { it.first.contains(mr.centerX(), mr.centerY()) }
+                .minByOrNull { it.first.width().toLong() * it.first.height() } ?: continue
+            cells.add(GalleryCell("box_${box.first.left / dp(24f)}_${box.first.top / dp(24f)}_${box.second}", box.first, box.second, checked))
+        }
+        if (headerSelectedCount == null && hasCancelButton) headerSelectedCount = bareDigitHeader
         val headerCount = headerSelectedCount
 
         val isGalleryContextMenuOpen = hasStrongContextMenuKeyword && matchedContextMenuRects.isNotEmpty()
@@ -766,7 +848,10 @@ class UniversalDragService : AccessibilityService() {
             else -> emptyList()
         }
 
-        if (targetCellsToResolve.isEmpty() && selectedGallerySessionMap.isEmpty()) return
+        if (targetCellsToResolve.isEmpty() && selectedGallerySessionMap.isEmpty()) {
+            dumpGalleryDebug(galleryRoots, "no target cells (cells=${cells.size}, marks=${checkMarks.size}, boxes=${cellBoxes.size}, header=$headerCount, menu=$isGalleryContextMenuOpen)")
+            return
+        }
 
         val firstCellRange = orderedCells.firstOrNull()?.let { parseGalleryDateRange(it.desc) }
         val lastCellRange = orderedCells.lastOrNull()?.let { parseGalleryDateRange(it.desc) }
@@ -855,6 +940,7 @@ class UniversalDragService : AccessibilityService() {
                                 val resolved = resolveCell(cell, crop)
                                 if (resolved != null) selectedGallerySessionMap[cell.key] = resolved else missed++
                             }
+                            if (missed > 0) dumpGalleryDebug(galleryRoots, "visual match failed for $missed cell(s): " + unresolved.joinToString { it.desc })
                             if (missed > 0) toast("원본을 확실히 찾지 못한 항목이 있어요. 공유 → ⚡ 원본 드래그를 써주세요")
                             showResolvedEntries()
                         }
@@ -980,7 +1066,7 @@ class UniversalDragService : AccessibilityService() {
 
     private fun handleWindowContentChangedForTextSelection(now: Long) {
         if (isGlobalDragging) return
-        val toolbarInfo = findFloatingSelectionToolbar()
+        val toolbarInfo = findFloatingSelectionToolbar() ?: return
 
         val treeSelection = findSelectedTextInAllWindows()
         if (treeSelection != null && treeSelection.first.isNotEmpty()) {
