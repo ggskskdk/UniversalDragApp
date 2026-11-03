@@ -123,9 +123,40 @@ class UniversalDragService : AccessibilityService() {
         "com.android.systemui"
     )
 
+    // 드래그 중 캡슐이 가장자리에 머물면: 좌/우 = 최근 앱, 위 = 분할 화면
+    private var edgeZone = 0
+    private var edgeSince = 0L
+    private var edgeFired = false
+    private val EDGE_DWELL_MS = 650L // ponytail: calibration knob - shorter fires by accident, longer feels laggy
+
+    private fun checkDragEdgeGesture() {
+        val w = resources.displayMetrics.widthPixels
+        val x = lastDropX
+        val y = lastDropY
+        val zone = when {
+            x <= 0f && y <= 0f -> 0
+            y < dp(36f) -> 3
+            x < dp(22f) -> 1
+            x > w - dp(22f) -> 2
+            else -> 0
+        }
+        val now = android.os.SystemClock.uptimeMillis()
+        if (zone != edgeZone) {
+            edgeZone = zone; edgeSince = now; edgeFired = false
+            return
+        }
+        if (zone == 0 || edgeFired || now - edgeSince < EDGE_DWELL_MS) return
+        edgeFired = true
+        val ok = performGlobalAction(
+            if (zone == 3) GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN else GLOBAL_ACTION_RECENTS
+        )
+        if (ok) toast(if (zone == 3) "분할 화면" else "최근 앱")
+    }
+
     private val sampleDragLocationRunnable = object : Runnable {
         override fun run() {
             if (!isGlobalDragging) return
+            checkDragEdgeGesture()
             setTrackerTouchable(true)
             mainHandler.postDelayed({
                 if (isGlobalDragging) setTrackerTouchable(false)
@@ -338,6 +369,7 @@ class UniversalDragService : AccessibilityService() {
         appPredicate: (String) -> Boolean = ::isMyFilesApp,
         fileNameRowsOnly: Boolean = false
     ): Boolean {
+        if (isGlobalDragging) return true
         val roots = collectAppRoots(appPredicate)
         if (roots.isEmpty()) return false
         val screenH = resources.displayMetrics.heightPixels
@@ -522,6 +554,7 @@ class UniversalDragService : AccessibilityService() {
      * - 날짜로 원본이 하나로 확정되면 스크린샷 없이 즉시 표시하고, 나머지만 스크린샷 시각 매칭(확신할 때만)
      */
     private fun syncGalleryMultiSelection(initialLongPressRect: Rect, isExplicitLongPress: Boolean) {
+        if (isGlobalDragging) return
         // 목록 보기에서 파일명이 보이면 이름으로 정확히 찾음 (zip/apk 등 비미디어 포함)
         if (syncMyFilesMultiSelection(initialLongPressRect, isExplicitLongPress, ::isGalleryApp, fileNameRowsOnly = true)) return
         val galleryRoots = collectAppRoots(::isGalleryApp)
@@ -789,13 +822,8 @@ class UniversalDragService : AccessibilityService() {
         }
 
         ioExecutor.execute {
-            // [1단계] 날짜로 원본이 하나로 확정되는 항목은 스크린샷 없이 즉시 표시
-            val unresolved = mutableListOf<GalleryCell>()
-            for (cell in targetCellsToResolve) {
-                if (selectedGallerySessionMap.containsKey(cell.key)) continue
-                val fast = resolveCell(cell, null)
-                if (fast != null) selectedGallerySessionMap[cell.key] = fast else unresolved.add(cell)
-            }
+            // [v11.3] 날짜가 하나뿐이어도 바로 믿지 않고 항상 화면 썸네일과 시각 비교로 확인 (엉뚱한 사진 방지)
+            val unresolved = targetCellsToResolve.filter { !selectedGallerySessionMap.containsKey(it.key) }
             showResolvedEntries()
             if (unresolved.isEmpty()) return@execute
 
@@ -1696,7 +1724,8 @@ class UniversalDragService : AccessibilityService() {
             emptyList()
         }
 
-        if (dateCandidates.size == 1) {
+        // 스크린샷이 없을 때만 날짜 유일 후보를 사용 (있으면 아래에서 시각 확인)
+        if (screenCrop == null && dateCandidates.size == 1) {
             val c = dateCandidates.first()
             return candidateToResolvedEntry(cellKey, c.uri, c.name, c.mime, c.width, c.height, c.isVideo)
         }
@@ -1715,8 +1744,14 @@ class UniversalDragService : AccessibilityService() {
             if (targetVec != null) {
                 var bestCand: MediaCandidate? = null
                 var bestScore = -2.0
-
-                for ((idx, cand) in pool.withIndex()) {
+                // 날짜 후보에서 못 찾으면(갤러리 표시 날짜와 DB 날짜가 다른 경우) 최근 항목 전체에서 다시 비교
+                val widePool = if (dateCandidates.isNotEmpty()) {
+                    val seen = pool.map { it.uri }.toSet()
+                    queryCandidates(null, null, 150).filter { it.uri !in seen && it.uri !in excludeUris }
+                } else emptyList()
+                var bestFromWide = false
+                for ((idx, cand) in (pool + widePool).withIndex()) {
+                    if (idx == pool.size && bestScore >= 0.80) break
                     runCatching {
                         val thumb = loadSquareCandidateThumbnail(cand.uri, cand.isVideo)
                         if (thumb != null) {
@@ -1729,6 +1764,7 @@ class UniversalDragService : AccessibilityService() {
                                 if (score > bestScore) {
                                     bestScore = score
                                     bestCand = cand
+                                    bestFromWide = idx >= pool.size
                                 }
                             }
                         }
@@ -1736,7 +1772,8 @@ class UniversalDragService : AccessibilityService() {
                 }
 
                 // ponytail: calibration knob - ZNCC below 0.80 means "looks different"; show nothing rather than a wrong photo
-                if (bestCand != null && bestScore >= 0.80) {
+                // 날짜가 안 맞는 넓은 후보에서 고른 경우엔 더 엄격하게
+                if (bestCand != null && bestScore >= (if (bestFromWide) 0.86 else 0.80)) {
                     val c = bestCand!!
                     return candidateToResolvedEntry(cellKey, c.uri, c.name, c.mime, c.width, c.height, c.isVideo)
                 }
@@ -1864,10 +1901,14 @@ class UniversalDragService : AccessibilityService() {
 
     private fun parseGalleryDateRange(desc: String): Pair<Long, Long>? {
         val dateRegex = Regex("(\\d{4})(?:년|\\.|-)\\s*(\\d{1,2})(?:월|\\.|-)\\s*(\\d{1,2})일?")
-        val match = dateRegex.find(desc) ?: return null
-        val year = match.groupValues[1].toIntOrNull() ?: return null
-        val month = (match.groupValues[2].toIntOrNull() ?: return null) - 1
-        val day = match.groupValues[3].toIntOrNull() ?: return null
+        // 올해 사진은 "11월 2일"처럼 연도 없이 표시됨
+        val full = dateRegex.find(desc)
+        val match = full ?: Regex("(\\d{1,2})월\\s*(\\d{1,2})일").find(desc) ?: return null
+        val g = if (full != null) match.groupValues
+                else listOf("", Calendar.getInstance().get(Calendar.YEAR).toString()) + match.groupValues.drop(1)
+        val year = g[1].toIntOrNull() ?: return null
+        val month = (g[2].toIntOrNull() ?: return null) - 1
+        val day = g[3].toIntOrNull() ?: return null
 
         val afterDate = desc.substring(match.range.last)
         val timeRegex = Regex("(오전|오후|AM|PM)?\\s*(\\d{1,2})(?:시|:)\\s*(\\d{1,2})분?")
@@ -2153,6 +2194,12 @@ class UniversalDragService : AccessibilityService() {
             val lp = container.layoutParams as WindowManager.LayoutParams
             lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
             runCatching { windowManager.updateViewLayout(container, lp) }
+            edgeZone = 0; edgeFired = false
+            // 갤러리 흰색 컨텍스트 메뉴가 떠 있으면 닫아서 드롭 대상이 가려지지 않게 함
+            if (wasGalleryContextMenuVisible) {
+                wasGalleryContextMenuVisible = false
+                performGlobalAction(GLOBAL_ACTION_BACK)
+            }
             mainHandler.postDelayed(sampleDragLocationRunnable, 60)
         } else {
             isGlobalDragging = false
