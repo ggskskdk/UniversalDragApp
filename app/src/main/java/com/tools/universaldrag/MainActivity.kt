@@ -35,7 +35,7 @@ class MainActivity : Activity() {
         }
 
         val title = TextView(this).apply {
-            text = "Universal Drag 12.0"
+            text = "Universal Drag 12.2"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
         }
@@ -68,6 +68,17 @@ class MainActivity : Activity() {
             }
         }
 
+        // 갤러리/내 파일에서 팝업이 뜨면 이전 앱으로 자동 전환
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        val autoSwitch = android.widget.Switch(this).apply {
+            text = "갤러리·내 파일에서 팝업이 뜨면 이전 앱으로 자동 전환"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setPadding(0, dp(16f), 0, dp(16f))
+            isChecked = prefs.getBoolean("auto_switch_back", true)
+            setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("auto_switch_back", on).apply() }
+        }
+
         val testInput = EditText(this).apply {
             hint = "드롭 및 키보드 입력 테스트창"
             setHintTextColor(Color.GRAY)
@@ -80,6 +91,7 @@ class MainActivity : Activity() {
         root.addView(guide)
         root.addView(btnAcc)
         root.addView(btnStorage)
+        root.addView(autoSwitch)
         root.addView(testInput)
         setContentView(root)
     }

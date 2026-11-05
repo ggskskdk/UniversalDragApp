@@ -247,6 +247,16 @@ class UniversalDragService : AccessibilityService() {
 
         val now = System.currentTimeMillis()
 
+        // 갤러리/내 파일/홈이 아닌 마지막 앱 기억 (자동 복귀 대상)
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val activeApp = rootInActiveWindow?.packageName?.toString() ?: ""
+            if (activeApp.isNotEmpty() && !isGalleryApp(activeApp) && !isMyFilesApp(activeApp) &&
+                !isHomeLauncher(activeApp) && activeApp != "com.android.systemui"
+            ) {
+                lastForegroundAppPkg = activeApp
+            }
+        }
+
         // [A] 내 파일 앱 (com.sec.android.app.myfiles)
         if (isMyFilesApp(pkgName) || (collectAppRoots(::isMyFilesApp).isNotEmpty() && isMyFilesApp(eventPkg))) {
             when (event.eventType) {
@@ -554,6 +564,7 @@ class UniversalDragService : AccessibilityService() {
             val payload = buildMultiEntryPayload(allEntries, hc)
             mainHandler.post {
                 showOrUpdateMediaOrFilePill(payload, anchorRow.rect.centerX(), anchorRow.rect.top)
+                scheduleSwitchBack(AUTO_SWITCH_SETTLE_MS)
             }
         }
         return true
@@ -896,6 +907,7 @@ class UniversalDragService : AccessibilityService() {
                 val payload = buildMultiEntryPayload(resolvedEntries, targetCount)
                 mainHandler.post {
                     showOrUpdateMediaOrFilePill(payload, popupX, popupY)
+                    scheduleSwitchBack(AUTO_SWITCH_SETTLE_MS)
                 }
             }
         }
@@ -1286,6 +1298,11 @@ class UniversalDragService : AccessibilityService() {
         }
     }
 
+    /**
+     * 텍스트 선택 플로팅 툴바("복사 | 모두 선택 | 웹 검색 ...") 탐색.
+     * ponytail: the system selection toolbar is its own small popup window; full-size app windows (ChatGPT/Claude
+     * message action rows with Copy|Share) and the keyboard are skipped so they can't fake a selection toolbar.
+     */
     private fun findFloatingSelectionToolbar(): Pair<Rect, Rect?>? {
         val allWindows = runCatching { windows }.getOrNull() ?: emptyList()
         val screenH = resources.displayMetrics.heightPixels
@@ -1298,9 +1315,8 @@ class UniversalDragService : AccessibilityService() {
             "삼성 패스에 저장", "Gemini에게 물어보기", "잘라내기", "Cut", "공유", "Share"
         )
 
-        val galleryMenuExclusions = listOf(
-            "클립보드에 복사", "앨범으로 복사", "앨범으로 이동", "공유 앨범에 추가", "즐겨찾기에 추가"
-        )
+        // 갤러리 컨텍스트 메뉴(앨범으로 복사 등)는 텍스트 선택 툴바에서 제외
+        val galleryMenuExclusions = listOf("클립보드에 복사", "앨범으로 복사", "앨범으로 이동")
 
         data class ActionNodeItem(val label: String, val rect: Rect)
         val foundItems = mutableListOf<ActionNodeItem>()
@@ -1334,15 +1350,14 @@ class UniversalDragService : AccessibilityService() {
         }
 
         for (w in allWindows) {
-            val wPkg = w.root?.packageName?.toString() ?: ""
-            if (wPkg == packageName || isGalleryApp(wPkg)) continue
-            scanNode(w.root)
-        }
-        if (foundItems.isEmpty()) {
-            val activePkg = rootInActiveWindow?.packageName?.toString() ?: ""
-            if (!isGalleryApp(activePkg)) {
-                scanNode(rootInActiveWindow)
-            }
+            if (w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+            val root = w.root ?: continue
+            val rootPkg = root.packageName?.toString() ?: ""
+            if (rootPkg == packageName || isGalleryApp(rootPkg)) continue
+            val wb = Rect()
+            w.getBoundsInScreen(wb)
+            if (wb.height() !in 1..(screenH * 0.4f).toInt()) continue
+            scanNode(root)
         }
 
         if (foundItems.isEmpty()) return null
@@ -2544,6 +2559,7 @@ class UniversalDragService : AccessibilityService() {
                             }
                             val p = buildMultiEntryPayload(entries, entries.size)
                             showOrUpdateMediaOrFilePill(p, 0, 0)
+                            scheduleSwitchBack(0L)
                         }
                     }
                 } else if (++tries < 12) {
@@ -2902,7 +2918,30 @@ class UniversalDragService : AccessibilityService() {
         }
     }
 
+    // ---------------- [v12.2] 팝업이 뜨면 이전 앱으로 자동 전환 (설정에서 on/off) ----------------
+    private var lastForegroundAppPkg = ""
+    // ponytail: calibration knob - time to keep multi-selecting before switching away
+    private val AUTO_SWITCH_SETTLE_MS = 1500L
+    private val switchBackRunnable = Runnable {
+        val target = lastForegroundAppPkg
+        if (target.isEmpty() || activeOverlayView == null) return@Runnable
+        val launch = packageManager.getLaunchIntentForPackage(target) ?: return@Runnable
+        // 이미 떠 있는 작업을 그대로 앞으로 가져옴 (새로 시작하지 않음)
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+        runCatching { startActivity(launch) }
+        // 다른 앱으로 넘어가도 팝업은 잡을 수 있게 유지
+        mainHandler.removeCallbacks(autoDismissRunnable)
+        mainHandler.postDelayed(autoDismissRunnable, 12000)
+    }
+
+    private fun scheduleSwitchBack(delayMs: Long) {
+        mainHandler.removeCallbacks(switchBackRunnable)
+        if (!getSharedPreferences("settings", MODE_PRIVATE).getBoolean("auto_switch_back", true)) return
+        mainHandler.postDelayed(switchBackRunnable, delayMs)
+    }
+
     private fun removeActiveOverlay() {
+        mainHandler.removeCallbacks(switchBackRunnable)
         pendingGalleryClipboard = false
         mainHandler.removeCallbacks(autoDismissRunnable)
         activeOverlayView?.let {
