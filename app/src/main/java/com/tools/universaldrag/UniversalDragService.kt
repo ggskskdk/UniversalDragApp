@@ -605,6 +605,8 @@ class UniversalDragService : AccessibilityService() {
         val albumSummaryCountRegex = Regex("^(이미지|사진|동영상|항목)\\s*\\d+\\s*(개|장)?$")
         val pureNumberRegex = Regex("^(\\d{1,3})$")
 
+        var menuHasClipboardCopy = false
+        var menuHasMake = false
         val contextMenuStrongKeywords = setOf(
             "클립보드에 복사", "앨범으로 복사", "앨범으로 이동", "공유 앨범에 추가", "즐겨찾기에 추가", "휴지통으로 이동", "보안 폴더로 이동"
         )
@@ -658,8 +660,11 @@ class UniversalDragService : AccessibilityService() {
             }
 
             // 5) 흰색 롱프레스 컨텍스트 메뉴 감지
+            // [v12.3] 사진 보기 화면의 하트(즐겨찾기에 추가)·공유·삭제 아이콘 설명글에 속지 않도록, 메뉴 글자(text)만 봄
+            if (ownText == "클립보드에 복사") menuHasClipboardCopy = true
+            if (ownText == "만들기") menuHasMake = true
             if (label.isNotEmpty() && label.length <= 22) {
-                if (contextMenuStrongKeywords.any { label.contains(it) }) {
+                if (ownText.isNotEmpty() && contextMenuStrongKeywords.any { ownText.contains(it) }) {
                     hasStrongContextMenuKeyword = true
                     matchedContextMenuRects.add(Rect(r))
                 } else if (contextMenuAllKeywords.any { label == it } && r.top < (screenH * 0.85f)) {
@@ -781,14 +786,16 @@ class UniversalDragService : AccessibilityService() {
             if (title.isNotEmpty()) lastActiveAlbumTitle = title
         }
 
-        val isGalleryContextMenuOpen = hasStrongContextMenuKeyword && matchedContextMenuRects.isNotEmpty()
+        // 꾹 누르기 메뉴에는 "만들기"와 "클립보드에 복사"가 함께 있음 (사진 보기 화면의 ⋮ 메뉴와 구분)
+        val isGalleryContextMenuOpen = menuHasClipboardCopy && menuHasMake && hasStrongContextMenuKeyword && matchedContextMenuRects.isNotEmpty()
         val contextMenuUnionRect = if (isGalleryContextMenuOpen) {
             Rect(matchedContextMenuRects.first()).apply {
                 for (mr in matchedContextMenuRects) union(mr)
             }
         } else null
 
-        val isSelectionActionBarVisible = hasTopCancelButton || bottomSelectionBarHits.size >= 2
+        // 사진 보기 화면에도 하단 공유/삭제 바가 있으므로 선택 모드는 상단 "취소" 버튼으로만 판단
+        val isSelectionActionBarVisible = hasTopCancelButton
         val effectiveSelectedCount = explicitHeaderCount
             ?: if (isSelectionActionBarVisible || isGalleryContextMenuOpen) (topLeftPureNumberBadge ?: 1) else null
 
@@ -803,7 +810,6 @@ class UniversalDragService : AccessibilityService() {
         val isGalleryInSelectionState = checkedCells.isNotEmpty() ||
                 isSelectionActionBarVisible ||
                 isGalleryContextMenuOpen ||
-                isExplicitLongPress ||
                 (effectiveSelectedCount != null && effectiveSelectedCount > 0)
 
         // 선택 모드가 완전히 해제된 경우 세션 초기화 및 팝업 닫기

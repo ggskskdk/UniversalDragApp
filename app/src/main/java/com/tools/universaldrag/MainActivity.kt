@@ -35,7 +35,7 @@ class MainActivity : Activity() {
         }
 
         val title = TextView(this).apply {
-            text = "Universal Drag 12.2"
+            text = "Universal Drag 12.3"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
         }
